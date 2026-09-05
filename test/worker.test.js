@@ -605,11 +605,14 @@ test("sends additional media of a multimedia deviation", async (t) => {
           title: "组图",
           isMultiMedia: true,
           media: { baseUri: "https://images.wixmp.com/main.jpg", token: "t1" },
+          extended: {
+            additionalMedia: [
+              { fileId: 2, media: { baseUri: "https://images.wixmp.com/extra2.jpg", token: "t2" } },
+              { fileId: 3, media: { baseUri: "https://images.wixmp.com/extra3.png", token: "t3" } },
+            ],
+          },
         },
       });
-    }
-    if (url.startsWith("https://www.deviantart.com/artist/art/group-999999999")) {
-      return new Response('{"page":1,"additionalMedia":[{"fileId":2,"media":{"baseUri":"https://images.wixmp.com/extra2.jpg","token":"t2"}},{"fileId":3,"media":{"baseUri":"https://images.wixmp.com/extra3.png","token":"t3"}}]}');
     }
     if (url.includes("api.telegram.org")) {
       sends.push({ url, body: JSON.parse(init.body) });

@@ -356,15 +356,23 @@ async function resolveWebMedia(url, env, origin, sessionMemo) {
   const allowMature = Boolean(env.DA_COOKIES);
   const item = extractDeviantArtMedia(deviation, allowMature);
   const extras = [];
-  // 多文件作品（isMultiMedia）：作品页内嵌 additionalMedia 列表，这里把其余画面也取出来
+  // 多文件作品：其余画面在 init 响应的 deviation.extended.additionalMedia 里
+  // （daviewer/dakit 同源结论），每项嵌套 Wix 媒体描述符；解析失败仅发主图。
   if (deviation?.isMultiMedia === true) {
     try {
-      const parsed = await multimediaExtras(url.href, session);
-      for (const media of parsed) {
-        extras.push({
-          kind: extensionKind(media.url) || "photo",
-          url: await createProxyUrl(origin, media.url, env.WEBHOOK_SECRET),
-        });
+      const raw = deviation?.extended?.additionalMedia;
+      if (Array.isArray(raw)) {
+        for (const entry of raw) {
+          if (extras.length >= 10) break;
+          const media = (entry && typeof entry === "object") ? entry.media : null;
+          const url = pickMultimediaUrl(media);
+          if (url) {
+            extras.push({
+              kind: extensionKind(url) || "photo",
+              url: await createProxyUrl(origin, url, env.WEBHOOK_SECRET),
+            });
+          }
+        }
       }
     } catch (error) {
       console.error("多图解析失败，仅发主图:", error instanceof Error ? error.message : String(error));
@@ -376,67 +384,6 @@ async function resolveWebMedia(url, env, origin, sessionMemo) {
     title: item.title,
     extras,
   };
-}
-
-// 从作品页 HTML 解析 additionalMedia（DA 内嵌 JSON，引号带 \" 转义），
-// 解析不出就返回空数组（不影响主图发送）。
-async function multimediaExtras(pageUrl, session) {
-  const response = await guardedFetch(pageUrl, {
-    headers: {
-      Accept: "text/html",
-      ...DA_HEADERS,
-      ...(session.cookies ? { Cookie: session.cookies } : {}),
-    },
-    signal: AbortSignal.timeout(40_000),
-  }, "作品页");
-  if (!response.ok) {
-    response.body?.cancel();
-    return [];
-  }
-  const html = await response.text();
-  const list = extractBalancedArray(html, "additionalMedia");
-  if (!list) return [];
-  const urls = [];
-  for (const entry of list) {
-    if (urls.length >= 10) break;
-    const media = (entry && typeof entry === "object") ? (entry.media || entry) : null;
-    const url = pickMultimediaUrl(media);
-    if (url) urls.push({ url });
-  }
-  return urls;
-}
-
-function extractBalancedArray(html, key) {
-  const un = html.replaceAll('\\"', '"');
-  const keyAt = un.indexOf(`"${key}"`);
-  if (keyAt < 0) return null;
-  const open = un.indexOf("[", keyAt);
-  if (open < 0) return null;
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let i = open; i < un.length; i += 1) {
-    const ch = un[i];
-    if (inString) {
-      if (escaped) escaped = false;
-      else if (ch === "\\") escaped = true;
-      else if (ch === '"') inString = false;
-      continue;
-    }
-    if (ch === '"') { inString = true; continue; }
-    if (ch === "[") depth += 1;
-    else if (ch === "]") {
-      depth -= 1;
-      if (depth === 0) {
-        try {
-          return JSON.parse(un.slice(open, i + 1));
-        } catch {
-          return null;
-        }
-      }
-    }
-  }
-  return null;
 }
 
 // 附加媒体的 URL 选择：与主媒体一致，优先 baseUri 原始文件，其次模板。
