@@ -636,3 +636,79 @@ test("sends additional media of a multimedia deviation", async (t) => {
   assert.match(group.body.media[0].caption, /组图/);
   assert.equal(group.body.media[1].caption, undefined); // 只有第一张带 caption
 });
+
+test("poll uploads a photo/video album, preserves group topic, and replays all file IDs", async (t) => {
+  const { handleUpdate } = await import('../src/index.js');
+  const originalFetch = globalThis.fetch;
+  t.after(installFakeCache());
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const sends = [];
+  let downloads = 0;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url === 'https://www.deviantart.com/') return new Response("window.__CSRF_TOKEN__ = 'csrf'");
+    if (url.includes('/_puppy/dadeviation/init')) return Response.json({ deviation: {
+      title: 'album', isMultiMedia: true,
+      media: { baseUri: 'https://images.wixmp.com/main.jpg', token: 't' },
+      extended: { additionalMedia: [{ media: { baseUri: 'https://images.wixmp.com/second.mp4', token: 't' } }] },
+    } });
+    if (url.includes('images.wixmp.com')) { downloads++; return new Response('file-bytes'); }
+    if (url.includes('api.telegram.org')) {
+      const body = init.body instanceof FormData ? Object.fromEntries(init.body) : JSON.parse(init.body);
+      sends.push({ method: url.split('/').pop(), body });
+      if (url.endsWith('/sendMediaGroup')) {
+        const media = typeof body.media === 'string' ? JSON.parse(body.media) : body.media;
+        assert.deepEqual(media.map(x => x.type), ['photo', 'video']);
+        assert.equal(String(body.message_thread_id), '77');
+        if (init.body instanceof FormData) {
+          assert.equal(media[0].media, 'attach://file0');
+          assert.equal(await body.file0.text(), 'file-bytes');
+          assert.equal(await body.file1.text(), 'file-bytes');
+        } else assert.deepEqual(media.map(x => x.media), ['PHOTO', 'VIDEO']);
+        return Response.json({ ok: true, result: [{ photo: [{ file_id: 'PHOTO' }] }, { video: { file_id: 'VIDEO' } }] });
+      }
+      return Response.json({ ok: true, result: { message_id: 90 } });
+    }
+    throw new Error(`Unexpected ${url}`);
+  };
+  const env = { BOT_TOKEN: '111:secret', WEBHOOK_SECRET: 'secret' };
+  const message = { message_id: 20, chat: { id: -900, type: 'supergroup' }, message_thread_id: 77,
+    text: 'https://www.deviantart.com/artist/art/album-777777', from: { id: 42 } };
+  await handleUpdate({ update_id: 9001, message }, env);
+  await handleUpdate({ update_id: 9002, message }, env);
+  assert.equal(sends.filter(x => x.body.text?.includes("处理失败")).length, 0, JSON.stringify(sends));
+  assert.equal(downloads, 2);
+  assert.equal(sends.filter(x => x.method === 'sendMediaGroup').length, 2);
+  assert.equal(sends.filter(x => x.method === 'sendPhoto').length, 0);
+  assert.equal(sends.filter(x => x.body.text?.includes('处理失败')).length, 0);
+});
+
+test('poll single photo falls back on Telegram size error and channel posts are handled', async (t) => {
+  const { handleUpdate } = await import('../src/index.js');
+  const originalFetch = globalThis.fetch;
+  t.after(installFakeCache());
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const methods = [];
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url === 'https://www.deviantart.com/') return new Response("window.__CSRF_TOKEN__ = 'csrf'");
+    if (url.includes('/_puppy/dadeviation/init')) return Response.json({ deviation: {
+      title: 'single', media: { baseUri: 'https://images.wixmp.com/single.jpg', token: 't' },
+    } });
+    if (url.includes('images.wixmp.com')) return new Response('photo-bytes');
+    const method = url.split('/').pop();
+    methods.push(method);
+    if (method === 'sendPhoto') return Response.json({ ok: false, description: 'Bad Request: file of size 15535898 bytes is too big for a photo; the maximum size is 10485760 bytes' }, { status: 400 });
+    if (method === 'sendDocument') {
+      assert.equal(await init.body.get('document').text(), 'photo-bytes');
+      return Response.json({ ok: true, result: { document: { file_id: 'DOC' } } });
+    }
+    return Response.json({ ok: true, result: { message_id: 91 } });
+  };
+  await handleUpdate({ update_id: 9100, channel_post: {
+    chat: { id: -1009, type: 'channel' }, message_id: 1,
+    text: 'https://www.deviantart.com/artist/art/single-888777',
+  } }, { BOT_TOKEN: '111:secret', WEBHOOK_SECRET: 'secret' });
+  assert.equal(methods.filter(x => x === 'sendPhoto').length, 1);
+  assert.equal(methods.filter(x => x === 'sendDocument').length, 1);
+});

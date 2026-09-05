@@ -11,3 +11,9 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      CACHE_FILE: /data/cache.json
+    volumes:
+      - cache:/data
+volumes:
+  cache:

@@ -3,6 +3,7 @@ const DEVIANTART = "https://www.deviantart.com/";
 // 浏览器 UA：DeviantArt 的 WAF 会拦明显的爬虫 UA（尤其是数据中心出口 IP）。
 const USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 const MAX_LINKS = 5;
+const PHOTO_MAX_BYTES = 10 * 1024 * 1024;
 const DA_HEADERS = {
   "Accept-Encoding": "gzip, br",
   "User-Agent": USER_AGENT,
@@ -63,9 +64,9 @@ export default {
 };
 
 // 处理单个 Telegram update。webhook 与长轮询共用同一入口。
-// origin 为 null 时（长轮询、无公网反代）媒体直接使用原始 URL 交给 Telegram 下载。
+// origin 为 null 时（长轮询、无公网反代）下载媒体后上传到 Telegram。
 export async function handleUpdate(update, env, origin = null) {
-  const message = update?.message;
+  const message = update?.message ?? update?.channel_post;
   if (!message?.chat?.id) return;
 
   // Telegram 在超时/断连后会重试同一个 update：若已处理完成过，直接跳过，
@@ -81,7 +82,8 @@ export async function handleUpdate(update, env, origin = null) {
       await telegram(env, "sendMessage", {
         chat_id: message.chat.id,
         text: `处理失败：${publicError(error)}`,
-        reply_parameters: { message_id: message.message_id },
+        reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+        ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
       });
     } catch {
       // Telegram 自身不可用时没有第二条可靠通知通道。
@@ -101,7 +103,8 @@ async function handleMessage(message, env, origin) {
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,
       text: "你没有使用这个 Bot 的权限。",
-      reply_parameters: { message_id: message.message_id },
+      reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+      ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
     });
     return;
   }
@@ -118,7 +121,8 @@ async function handleMessage(message, env, origin) {
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,
       text: command === "about" ? ABOUT_TEXT : HELP_TEXT,
-      reply_parameters: { message_id: message.message_id },
+      reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+      ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
     });
     return;
   }
@@ -130,7 +134,8 @@ async function handleMessage(message, env, origin) {
       await telegram(env, "sendMessage", {
         chat_id: message.chat.id,
         text: HINT_TEXT,
-        reply_parameters: { message_id: message.message_id },
+        reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+        ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
       });
     }
     return;
@@ -160,8 +165,8 @@ async function handleMessage(message, env, origin) {
     if (!statusId) return;
     const now = Date.now();
     const elapsed = now - statusLastEdit;
-    // 同一句话才严格节流；阶段切换（文字变了）允许 300ms 后即刷新，避免“发送中”被吞
-    if (text === statusLastText ? elapsed < 900 : elapsed < 300) return;
+    // 下载百分比节流；获取、压缩、发送等阶段切换必须可见。
+    if (text === statusLastText || (/\d+%$/.test(text) && elapsed < 900)) return;
     statusLastEdit = now;
     statusLastText = text;
     try {
@@ -184,7 +189,8 @@ async function handleMessage(message, env, origin) {
       const sent = await telegram(env, "sendMessage", {
         chat_id: message.chat.id,
         text: "⏳ 正在获取作品信息…",
-        reply_parameters: { message_id: message.message_id },
+        reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+        ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
       });
       statusId = sent?.message_id ?? null;
     } catch {
@@ -202,7 +208,8 @@ async function handleMessage(message, env, origin) {
         await telegram(env, "sendMessage", {
           chat_id: message.chat.id,
           text: `${pending.length > 1 ? `第 ${index + 1} 个链接` : ""}处理失败：${publicError(error)}`,
-          reply_parameters: { message_id: message.message_id },
+          reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+          ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
         });
       }
     }
@@ -210,14 +217,16 @@ async function handleMessage(message, env, origin) {
       await telegram(env, "sendMessage", {
         chat_id: message.chat.id,
         text: RATE_TEXT,
-        reply_parameters: { message_id: message.message_id },
+        reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+        ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
       });
     }
     if (links.length > selected.length) {
       await telegram(env, "sendMessage", {
         chat_id: message.chat.id,
         text: `单条消息最多处理 ${MAX_LINKS} 个链接，其余 ${links.length - selected.length} 个未处理。`,
-        reply_parameters: { message_id: message.message_id },
+        reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+        ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
       });
     }
   } finally {
@@ -325,7 +334,7 @@ async function sendDeviantArt(url, message, env, origin, sessionMemo = {}, onSta
       await rememberAlbumFileIds(target.id, media.title, albumResults, env);
     } else {
       const sent = await sendOne(media.kind, media.url, `${media.title}\n${url.href}`, message, env, !origin, onStatus, media.display);
-      await rememberFileId(target.id, media.kind, media.title, sent, env);
+      if (items.length === 1) await rememberFileId(target.id, media.kind, media.title, sent, env);
       for (const extra of media.extras || []) {
         await sendOne(extra.kind, extra.url, `（${media.title} 的更多画面）`, message, env, !origin, onStatus, extra.display);
       }
@@ -376,7 +385,6 @@ async function resolveWebMedia(url, env, origin, sessionMemo) {
           const raw = deviation?.extended?.additionalMedia;
           if (Array.isArray(raw)) {
             for (const entry of raw) {
-              if (extras.length >= 10) break;
               const media = (entry && typeof entry === "object") ? entry.media : null;
               const extraUrl = pickMultimediaUrl(media);
               if (extraUrl) {
@@ -611,7 +619,8 @@ async function sendOne(kind, mediaUrl, caption, message, env, upload = false, on
       chat_id: message.chat.id,
       [fields[1]]: mediaUrl,
       caption: text,
-      reply_parameters: { message_id: message.message_id },
+      reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+      ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
     });
   } catch (error) {
     // 照片 URL 超过 10 MiB：改以文档方式让 Telegram 下载（文档上限 50 MiB）。
@@ -621,7 +630,8 @@ async function sendOne(kind, mediaUrl, caption, message, env, upload = false, on
         chat_id: message.chat.id,
         [docField]: mediaUrl,
         caption: text,
-        reply_parameters: { message_id: message.message_id },
+        reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+        ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
       });
     }
     throw error;
@@ -641,7 +651,8 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null) 
         media: item.url,
         ...(index === 0 ? { caption: firstCaption } : {}),
       })),
-      reply_parameters: { message_id: message.message_id },
+      reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+      ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
     });
     return Array.isArray(result) ? result : [result];
   }
@@ -689,7 +700,7 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null) 
         const pct = Math.floor((received / totalBytes) * 100);
         if (pct % 5 === 0 && pct > lastPct) {
           lastPct = pct;
-          onStatus(`正在下载 ${indexLabel} ${pct}%`);
+          await onStatus(`正在下载 ${indexLabel} ${pct}%`);
         }
       }
     }
@@ -700,12 +711,12 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null) 
       usedFallbackAny = true;
     }
     if (items[i].kind === "photo" && bytes.length > PHOTO_MAX_BYTES) {
+      if (onStatus) await onStatus(`正在压缩 ${indexLabel}…`);
       const compressed = await compressPhoto(bytes);
       if (compressed) {
         bytes = compressed;
         extension = "jpg";
         compressedAny = true;
-        if (onStatus) onStatus(`正在压缩 ${indexLabel}…`);
       } else {
         docFalls.push({ url: items[i].url, bytes, extension });
         continue;
@@ -718,47 +729,43 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null) 
   if (usedFallbackAny) notes.push("部分原图额度受限，已用最高清展示图替代");
   const fullCaption = (notes.length === 0 ? firstCaption : `${firstCaption}（${notes.join("；")}）`).slice(0, 1024);
   const results = [];
-  const mediaForm = (field) => {
+  const mediaForm = () => {
     const form = new FormData();
     form.set("chat_id", String(message.chat.id));
-    form.set("reply_parameters", JSON.stringify({ message_id: message.message_id }));
+    form.set("reply_parameters", JSON.stringify({ message_id: message.message_id, allow_sending_without_reply: true }));
+    if (message.message_thread_id) form.set("message_thread_id", String(message.message_thread_id));
     return form;
   };
   if (entries.length >= 2) {
-    // 相册：用同一 media_group_id 逐张 sendPhoto，Telegram 服务端合成一条相册
-    // （sendMediaGroup 的 multipart 在我们的请求链路里触发 “media required”，此路更稳）。
-    const groupId = `dd${Date.now()}${Math.random().toString(36).slice(2, 8)}`;
-    if (onStatus) onStatus("正在发送相册…");
-    for (let i = 0; i < entries.length; i += 1) {
-      const { bytes, extension } = entries[i];
-      const form = mediaForm("photo");
-      form.set("photo", new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `photo${i}.${extension}`);
-      form.set("media_group_id", groupId);
-      if (i === 0) form.set("caption", fullCaption);
-      else form.delete("reply_parameters");
-      results.push(await telegramForm(env, "sendPhoto", () => {
-        const f = mediaForm("photo");
-        f.set("photo", new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `photo${i}.${extension}`);
-        f.set("media_group_id", groupId);
-        if (i === 0) f.set("caption", fullCaption);
-        else f.delete("reply_parameters");
-        return f;
-      }));
-    }
+    if (onStatus) await onStatus("正在发送相册…");
+    const sent = await telegramForm(env, "sendMediaGroup", () => {
+      const form = mediaForm();
+      form.set("media", JSON.stringify(entries.map((entry, i) => ({
+        type: entry.kind,
+        media: `attach://file${i}`,
+        ...(i === 0 ? { caption: fullCaption } : {}),
+      }))));
+      entries.forEach(({ bytes, extension }, i) => {
+        form.set(`file${i}`, new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `file${i}.${extension}`);
+      });
+      return form;
+    });
+    results.push(...sent);
   } else if (entries.length === 1) {
-    const { bytes, extension } = entries[0];
-    if (onStatus) onStatus("正在发送…");
-    results.push(await telegramForm(env, "sendPhoto", () => {
-      const f = mediaForm("photo");
+    const { bytes, extension, kind } = entries[0];
+    const [method, field] = MEDIA_FIELDS[kind];
+    if (onStatus) await onStatus("正在发送…");
+    results.push(await telegramForm(env, method, () => {
+      const f = mediaForm();
       f.set("caption", fullCaption);
-      f.set("photo", new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `photo0.${extension}`);
+      f.set(field, new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `${field}.${extension}`);
       return f;
     }));
   }
   for (const doc of docFalls) {
-    if (onStatus) onStatus("正在发送（超大原图以文件发送）…");
+    if (onStatus) await onStatus("正在发送（超大原图以文件发送）…");
     results.push(await telegramForm(env, "sendDocument", () => {
-      const f = mediaForm("document");
+      const f = mediaForm();
       f.set("document", new Blob([doc.bytes], { type: "application/octet-stream" }), `original.${doc.extension}`);
       return f;
     }));
@@ -791,7 +798,8 @@ async function sendAlbumByFileIds(files, caption, message, env) {
       media: file.file_id,
       ...(index === 0 ? { caption: firstCaption } : {}),
     })),
-    reply_parameters: { message_id: message.message_id },
+    reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+    ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
   });
 }
 
@@ -803,7 +811,8 @@ async function sendFileById(kind, fileId, caption, message, env) {
     chat_id: message.chat.id,
     [fields[1]]: fileId,
     caption: String(caption).slice(0, 1024),
-    reply_parameters: { message_id: message.message_id },
+    reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+    ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
   });
 }
 
@@ -868,23 +877,22 @@ async function uploadMedia(env, kind, mediaUrl, caption, message, onStatus = nul
       const pct = Math.floor((received / totalBytes) * 100);
       if (pct % 5 === 0 && pct > lastPct) {
         lastPct = pct;
-        onStatus(`正在下载 ${pct}%`);
+        await onStatus(`正在下载 ${pct}%`);
       }
     }
   }
   let bytes = concatBytes(chunks);
-  if (onStatus) onStatus("正在发送…");
   let extension = guessExtension(mediaUrl, kind);
   let sendAs = kind;
   let captionText = caption;
   // 照片超过阈值：优先压缩成可内嵌预览的照片发（Telegram 显示为图片）；压缩不可用才转文档
   if (kind === "photo" && bytes.length > PHOTO_MAX_BYTES) {
+    if (onStatus) await onStatus("原图较大，正在压缩…");
     const compressed = await compressPhoto(bytes);
     if (compressed) {
       bytes = compressed;
       extension = "jpg";
       captionText = `${caption}（原图超过 10MB，已压缩发送）`;
-      if (onStatus) onStatus("原图较大，正在压缩…");
     } else {
       sendAs = "document";
     }
@@ -897,10 +905,12 @@ async function uploadMedia(env, kind, mediaUrl, caption, message, onStatus = nul
     const form = new FormData();
     form.set("chat_id", String(message.chat.id));
     form.set("caption", captionText);
-    form.set("reply_parameters", JSON.stringify({ message_id: message.message_id }));
+    form.set("reply_parameters", JSON.stringify({ message_id: message.message_id, allow_sending_without_reply: true }));
+    if (message.message_thread_id) form.set("message_thread_id", String(message.message_thread_id));
     form.set(field, new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `${field}.${extension}`);
     return form;
   };
+  if (onStatus) await onStatus("正在发送…");
   const [method, field] = MEDIA_FIELDS[sendAs];
   try {
     return await telegramForm(env, method, makeForm(field));
@@ -964,14 +974,6 @@ async function telegramForm(env, method, formOrFactory) {
     }
     if (!response.ok || !result?.ok) {
       const description = result?.description || `HTTP ${response.status}`;
-      // 代理出口抖动会让 multipart 丢文件，表现为 no photo / media required：
-      // 重建表单再发（文件字节仍在闭包里，不重新下载）
-      const transient = /no photo in the request|media.*required|media is required/i.test(description);
-      if (transient && attempt < 2) {
-        console.error(`[tg] ${method} ${description} — 重建重试 ${attempt + 1}`);
-        await sleep(800 * (attempt + 1));
-        continue;
-      }
       console.error(`[tg] ${method} 失败: ${description}`);
       throw new Error(description);
     }
@@ -993,7 +995,7 @@ function quotaOrMediaError(status) {
 
 function isTooBigError(error) {
   const text = error instanceof Error ? error.message : String(error);
-  return /file is too big|image is too big|too large|PHOTO_INVALID_DIMENSIONS/i.test(text);
+  return /file (?:is|of size .* is) too big|image is too big|too large|PHOTO_INVALID_DIMENSIONS/i.test(text);
 }
 
 function concatBytes(chunks) {

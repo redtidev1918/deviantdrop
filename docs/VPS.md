@@ -120,3 +120,13 @@ docker compose logs -f deviantdrop     # 轮询模式会持续 getUpdates
   `curl -x http://127.0.0.1:7890 https://www.gstatic.com/generate_204` 验证代理。
 - DA 报 403/500 类错误 → 该出口（或该机场节点）被 DA 拦：换节点/换出口后重试。
 - 官方凭据填错 → 「凭据无效」；匿名网页路径仅在出口未被 DA 封禁时可用。
+
+### 上传与群聊诊断
+
+- Node 原生 `fetch` 与原生 `FormData` 必须配套使用；代理通过 `dispatcher` 指定。混用独立版本的 `undici.fetch` 可能发送纯文本 `[object FormData]`，导致 Telegram 报缺少 photo/media。
+- 相册必须使用 `sendMediaGroup`；给多条 `sendPhoto` 添加 `media_group_id` 不会合并成相册。
+- 群话题回复保留 `message_thread_id`，频道的 `channel_post` 同样处理。设置了 `ALLOWED_USER_IDS` 时仍按发送者用户 ID 授权，匿名管理员/频道身份不能冒充获准用户。
+- 日志没有对应 `[upd]` 时检查 Telegram 投递及是否有其他轮询实例；有 `[upd]` 时检查发送权限与错误日志。不能仅凭 `/about` 到达就认定普通链接也已投递。
+- `npm test` 包含本地真实 HTTP multipart 序列化和轮询相册测试，不会向真实 Telegram 聊天发送消息。
+
+Docker Compose 使用独立的 `cache` 卷保存 file_id 缓存，更新容器不会清空。旧部署如有 `/tmp/deviantdrop-cache.json`，升级前备份并迁移到卷内 `/data/cache.json`；不要运行 `docker compose down -v`，该命令会删除缓存卷。

@@ -14,7 +14,8 @@ import { createServer } from "node:http";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { Agent, ProxyAgent, fetch as undiciFetch } from "undici";
+import { Agent, ProxyAgent } from "undici";
+import { createProxyFetch } from "./network.js";
 import worker, { handleUpdate } from "./index.js";
 
 // —— 代理：国内服务器经 clash 等出口访问被墙的 Telegram/DeviantArt ——
@@ -24,21 +25,7 @@ if (proxyUrl) {
   // 媒体 CDN（wixmp/deviantart.net）国内可直连且更稳：不走机场出口；
   // DA 页面 / 官方 API / Telegram / archive 仍走代理。
   const proxyAgent = new ProxyAgent(proxyUrl);
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (input, init) => {
-    let url;
-    try {
-      url = new URL(typeof input === "string" ? input : input?.url);
-    } catch {
-      return originalFetch(input, init);
-    }
-    const host = url.hostname.toLowerCase();
-    const mediaDirect =
-      host.endsWith(".wixmp.com") ||
-      host.endsWith(".deviantart.net") ||
-      host.endsWith(".wixstatic.com");
-    return undiciFetch(input, { ...(init || {}), dispatcher: mediaDirect ? directAgent : proxyAgent });
-  };
+  globalThis.fetch = createProxyFetch(proxyAgent, directAgent);
   console.log(`outbound proxy: ${proxyUrl} (媒体直连)`);
 }
 
@@ -167,7 +154,7 @@ async function pollUpdates(env) {
         continue;
       }
       for (const update of data.result || []) {
-        const msg = update.message;
+        const msg = update.message ?? update.channel_post;
         console.log(
           `[upd] id=${update.update_id} chat=${msg?.chat?.type ?? "?"}(${msg?.chat?.id ?? "?"}) ` +
           `from=${msg?.from?.id ?? "?"} text=${(msg?.text ?? msg?.caption ?? "").slice(0, 40).replace(/\n/g, " ") || "<no-text>"}`,

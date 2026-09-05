@@ -6,7 +6,7 @@
 
 ## 支持范围
 
-Bot 会同时检查普通消息和媒体 caption，并识别：
+Bot 会同时检查普通消息、频道消息和媒体 caption，并识别：
 
 - 明文 `https://`、`http://` 链接；已知 DeviantArt 域名会统一升级为 HTTPS。
 - 没有协议的 `www.deviantart.com/...`、旧式 `作者.deviantart.com/...`。
@@ -39,7 +39,7 @@ Bot 会同时检查普通消息和媒体 caption，并识别：
    - **网页通道**：匿名会话（CSRF/cookie，消息内复用 + 跨消息缓存）请求网页作品接口，返回最高清晰度 MP4/图片/GIF（含视频）；
    - **官方通道**（网页不可达时的兜底）：`client_credentials` 换 token → 数字 id 经 archive.org 存档映射为 UUID（长期缓存）→ 调官方 API 取媒体。
 4. 先回一条自动删除的「处理中」提示并随进度更新，然后发送媒体（媒体 caption 带原作品页链接）。
-5. 媒体送达：webhook 模式经 15 分钟 HMAC 签名代理流式转发（支持 Range）；轮询模式直接把带 token 的 CDN 地址交给 Telegram 下载。
+5. 媒体送达：webhook 模式经 15 分钟 HMAC 签名代理流式转发（支持 Range）；轮询模式下载媒体后通过 multipart 上传；2–10 个照片/视频使用 `sendMediaGroup`，GIF 或更多文件逐项发送。
 
 ## 限流与可靠性
 

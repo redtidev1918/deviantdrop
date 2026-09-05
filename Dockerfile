@@ -10,7 +10,10 @@ RUN npm ci --omit=dev
 COPY src ./src
 COPY README.md ./
 
-# 以非 root 运行（镜像自带 node 用户；应用只读代码、无写盘需求）
+# 缓存目录由 named volume 持久化，容器重建后仍可复用 file_id。
+RUN mkdir -p /data && chown node:node /data
+
+# 以非 root 运行（镜像自带 node 用户）
 USER node
 
 ENV NODE_ENV=production
