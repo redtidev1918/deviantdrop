@@ -712,3 +712,32 @@ test('poll single photo falls back on Telegram size error and channel posts are 
   assert.equal(methods.filter(x => x === 'sendPhoto').length, 1);
   assert.equal(methods.filter(x => x === 'sendDocument').length, 1);
 });
+
+test('poll compresses a real oversized image before upload', async (t) => {
+  const sharp = (await import('sharp')).default;
+  const { handleUpdate } = await import('../src/index.js');
+  const originalFetch = globalThis.fetch;
+  t.after(installFakeCache());
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const bytes = await sharp({ create: { width: 2048, height: 2048, channels: 3, background: '#123456' } }).png({ compressionLevel: 0 }).toBuffer();
+  assert.ok(bytes.length > 10 * 1024 * 1024);
+  let uploaded = false;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url === 'https://www.deviantart.com/') return new Response("window.__CSRF_TOKEN__ = 'csrf'");
+    if (url.includes('/_puppy/dadeviation/init')) return Response.json({ deviation: {
+      title: 'large', media: { baseUri: 'https://images.wixmp.com/large.png', token: 't' },
+    } });
+    if (url.includes('images.wixmp.com')) return new Response(bytes);
+    if (url.endsWith('/sendPhoto')) {
+      const photo = init.body.get('photo');
+      assert.ok(photo.size < 10 * 1024 * 1024);
+      assert.equal((await sharp(Buffer.from(await photo.arrayBuffer())).metadata()).format, 'jpeg');
+      uploaded = true;
+    }
+    return Response.json({ ok: true, result: { message_id: 92 } });
+  };
+  await handleUpdate({ message: { chat: { id: 777, type: 'private' }, message_id: 1,
+    text: 'https://www.deviantart.com/artist/art/large-999888' } }, { BOT_TOKEN: '111:secret', WEBHOOK_SECRET: 'secret' });
+  assert.equal(uploaded, true);
+});

@@ -18,3 +18,9 @@
 历史“全部收工/一劳永逸”的表述不成立：原测试未覆盖轮询上传。该记录描述发布前审查；线上部署与验收结果见对应 Release。上游仓库的历史发版状态也不能由此会话推定为当前成功。
 
 本轮结果：18/18 测试通过，Wrangler dry-run 与 git diff --check 通过。现有 VPS 的 Node v22.23.2 也复现了 text/plain / [object FormData]。只读 Telegram 检查确认 can_read_all_group_messages=true、webhook 未配置、allowed_updates 包含 message/channel_post、未配置用户白名单。这排除了当前隐私设置、webhook 冲突和白名单导致群聊静默的解释，仍需部署后真实消息验收。
+
+## v1.3.2 线上验收
+
+在 VPS 上使用相同的下载/发送处理函数，向获准测试私聊与群聊各发送一次真实双图作品。两次 sendMediaGroup 均成功；每次返回 2 条消息且 media_group_id 相同，确认真实相册。该主动测试覆盖解析、下载、上传、聊天发送权限，不等同于证明 Telegram 已投递用户新发的群聊链接。缓存目录挂载独立 Docker 卷并确认非 root 进程可写；部署前保留旧镜像及配置。
+
+构建审计发现图像依赖受 [GHSA-f88m-g3jw-g9cj](https://github.com/advisories/GHSA-f88m-g3jw-g9cj) 影响，更新 sharp 至 0.35.4，并补充真实大图压缩后上传测试。
