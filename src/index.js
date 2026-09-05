@@ -149,32 +149,69 @@ async function handleMessage(message, env, origin) {
   // 每聊天每分钟的链接预算：超出部分发提示后跳过，防止单聊把 DeviantArt/Telegram 打爆。
   const budget = await takeLinkBudget(message.chat.id, selected.length);
   const pending = selected.slice(0, budget);
-  // 一条消息内的多个链接共享同一个网页 session（备忘录；跨消息仍有 Cache 层复用）。
-  const sessionMemo = {};
-  for (let index = 0; index < pending.length; index += 1) {
+
+  // “处理中”临时状态提示：带进度，全部完成后自动删除（尽力而为，失败不影响主体）。
+  const total = pending.length;
+  let statusId = null;
+  if (total > 0) {
     try {
-      await sendDeviantArt(new URL(pending[index]), message, env, origin, sessionMemo);
-    } catch (error) {
+      const sent = await telegram(env, "sendMessage", {
+        chat_id: message.chat.id,
+        text: `⏳ 正在获取第 1/${total} 个作品的媒体…`,
+        reply_parameters: { message_id: message.message_id },
+      });
+      statusId = sent?.message_id ?? null;
+    } catch {
+      statusId = null;
+    }
+  }
+  const updateStatus = async (nextIndex) => {
+    if (!statusId) return;
+    try {
+      if (nextIndex >= total) {
+        await telegram(env, "deleteMessage", { chat_id: message.chat.id, message_id: statusId });
+      } else {
+        await telegram(env, "editMessageText", {
+          chat_id: message.chat.id,
+          message_id: statusId,
+          text: `⏳ 正在获取第 ${nextIndex + 1}/${total} 个作品的媒体…`,
+        });
+      }
+    } catch {
+      // 状态消息可能已被删除或过期，忽略
+    }
+  };
+  try {
+    // 一条消息内的多个链接共享同一个网页 session（备忘录；跨消息仍有 Cache 层复用）。
+    const sessionMemo = {};
+    for (let index = 0; index < pending.length; index += 1) {
+      try {
+        await sendDeviantArt(new URL(pending[index]), message, env, origin, sessionMemo);
+      } catch (error) {
+        await telegram(env, "sendMessage", {
+          chat_id: message.chat.id,
+          text: `${pending.length > 1 ? `第 ${index + 1} 个链接` : ""}处理失败：${publicError(error)}`,
+          reply_parameters: { message_id: message.message_id },
+        });
+      }
+      await updateStatus(index + 1);
+    }
+    if (budget < selected.length) {
       await telegram(env, "sendMessage", {
         chat_id: message.chat.id,
-        text: `${pending.length > 1 ? `第 ${index + 1} 个链接` : ""}处理失败：${publicError(error)}`,
+        text: RATE_TEXT,
         reply_parameters: { message_id: message.message_id },
       });
     }
-  }
-  if (budget < selected.length) {
-    await telegram(env, "sendMessage", {
-      chat_id: message.chat.id,
-      text: RATE_TEXT,
-      reply_parameters: { message_id: message.message_id },
-    });
-  }
-  if (links.length > selected.length) {
-    await telegram(env, "sendMessage", {
-      chat_id: message.chat.id,
-      text: `单条消息最多处理 ${MAX_LINKS} 个链接，其余 ${links.length - selected.length} 个未处理。`,
-      reply_parameters: { message_id: message.message_id },
-    });
+    if (links.length > selected.length) {
+      await telegram(env, "sendMessage", {
+        chat_id: message.chat.id,
+        text: `单条消息最多处理 ${MAX_LINKS} 个链接，其余 ${links.length - selected.length} 个未处理。`,
+        reply_parameters: { message_id: message.message_id },
+      });
+    }
+  } finally {
+    await updateStatus(total); // 完成：删除状态提示
   }
 }
 

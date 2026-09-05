@@ -119,13 +119,14 @@ test("resolves two links with one DeviantArt session and serves the signed proxy
     }),
   }), env);
 
+  const mediaCalls = telegramCalls.filter((c) => /send(Photo|Video|Animation)$/.test(c.url));
   assert.equal(response.status, 200);
   assert.equal(homeCalls, 1);
   assert.equal(initCalls, 2);
-  assert.equal(telegramCalls.length, 2);
-  assert.match(telegramCalls[0].url, /sendVideo$/);
-  assert.match(telegramCalls[0].body.caption, /作品 — artist/);
-  const proxied = await worker.fetch(new Request(telegramCalls[0].body.video, {
+  assert.equal(mediaCalls.length, 2);
+  assert.match(mediaCalls[0].url, /sendVideo$/);
+  assert.match(mediaCalls[0].body.caption, /作品 — artist/);
+  const proxied = await worker.fetch(new Request(mediaCalls[0].body.video, {
     headers: { Range: "bytes=0-4" },
   }), env);
   assert.equal(proxied.status, 206);
@@ -151,7 +152,8 @@ test("reports a missing artwork to the user", async (t) => {
     }
     if (url.includes("/_puppy/dadeviation/init")) return new Response("missing", { status: 404 });
     if (url.includes("api.telegram.org")) {
-      errorMessage = JSON.parse(init.body).text;
+      const text = JSON.parse(init.body).text;
+      if (text) errorMessage = text; // 状态提示先于错误、删除消息无 text，只保留最后一次带正文的消息
       return Response.json({ ok: true, result: {} });
     }
     throw new Error(`unexpected fetch: ${url}`);
@@ -255,16 +257,17 @@ test("answers /about, parses media captions, and ignores link-less or own-forwar
   assert.equal(about.replies.length, 1);
   assert.match(about.replies[0].body.text, /github\.com\/redtidev1918\/deviantdrop/);
 
-  // 图片 + caption 带链接：照常解析并下载。
+  // 图片 + caption 带链接：照常解析并下载（“处理中”提示会自动删除）。
   const caption = await send({
     message_id: 2, from: { id: 42 }, chat: { id: 42, type: "private" },
     caption: "看看这幅 https://www.deviantart.com/artist/art/work-123",
     photo: [{ file_id: "f" }],
   });
+  const captionMedia = caption.replies.filter((c) => /send(Photo|Video|Animation)$/.test(c.url));
   assert.equal(caption.downloads, 1);
-  assert.equal(caption.replies.length, 1);
-  assert.match(caption.replies[0].url, /sendPhoto$/);
-  assert.match(caption.replies[0].body.caption, /deviantart\.com\/artist\/art\/work-123/);
+  assert.equal(captionMedia.length, 1);
+  assert.match(captionMedia[0].url, /sendPhoto$/);
+  assert.match(captionMedia[0].body.caption, /deviantart\.com\/artist\/art\/work-123/);
 
   // 无 caption 的图片：静默忽略。
   const plain = await send({
@@ -365,7 +368,7 @@ test("reuses the DeviantArt session across messages", async (t) => {
 
   assert.equal(calls.home, 1); // 只请求了一次 DeviantArt 首页
   assert.equal(calls.init, 2);
-  assert.equal(calls.telegram.length, 2);
+  assert.equal(calls.telegram.filter((c) => /send(Photo|Video|Animation)$/.test(c.url)).length, 2);
 });
 
 test("skips duplicate updates and repeated album links", async (t) => {
@@ -377,10 +380,11 @@ test("skips duplicate updates and repeated album links", async (t) => {
 
   // 同一个 update_id 投递两次：只处理一次。
   const once = { from: { id: 42 }, chat, message_id: 10, text: "https://www.deviantart.com/artist/art/work-333" };
+  const mediaOf = () => calls.telegram.filter((c) => /send(Photo|Video|Animation)$/.test(c.url)).length;
   await postMessage(env, 201, once);
   await postMessage(env, 201, once);
   assert.equal(calls.init, 1);
-  assert.equal(calls.telegram.length, 1);
+  assert.equal(mediaOf(), 1);
 
   // 同一相册的两张照片都带链接：只处理第一条。
   await postMessage(env, 202, {
@@ -394,7 +398,7 @@ test("skips duplicate updates and repeated album links", async (t) => {
     photo: [{ file_id: "b" }],
   });
   assert.equal(calls.init, 2);
-  assert.equal(calls.telegram.length, 2);
+  assert.equal(mediaOf(), 2);
 });
 
 test("limits how many links one chat may process per minute", async (t) => {
@@ -412,7 +416,8 @@ test("limits how many links one chat may process per minute", async (t) => {
   }
 
   assert.equal(calls.init, 15); // 前 15 个链接被处理
-  assert.equal(calls.telegram.length, 16); // 15 条媒体 + 1 条限流提示
+  const mediaCount = calls.telegram.filter((c) => /send(Photo|Video|Animation)$/.test(c.url)).length;
+  assert.equal(mediaCount, 15); // 15 条媒体（另有若干自动删除的“处理中”状态提示）
   assert.match(calls.telegram.at(-1).body.text, /操作太快/);
   assert.equal(calls.telegram.at(-1).url.endsWith("sendMessage"), true);
 });
@@ -467,9 +472,10 @@ test("resolves artwork via official API and archive.org UUID mapping", async (t)
   assert.equal(calls.cdx, 0); // 免 CDX 索引，直接请求快照 replay
   assert.equal(calls.snapshot, 1); // uuid 已缓存，第二条相同链接不再查存档
   assert.equal(calls.deviation, 2);
-  assert.equal(calls.telegram.length, 2);
-  assert.match(calls.telegram[0].url, /sendPhoto$/);
-  assert.match(calls.telegram[0].body.caption, /deviantart\.com\/loish\/art\/underwater-913624585/);
+  const mediaCalls = calls.telegram.filter((c) => /send(Photo|Video|Animation)$/.test(c.url));
+  assert.equal(mediaCalls.length, 2);
+  assert.match(mediaCalls[0].url, /sendPhoto$/);
+  assert.match(mediaCalls[0].body.caption, /deviantart\.com\/loish\/art\/underwater-913624585/);
 });
 
 test("explains that fav.me short links need a canonical page URL on the official path", async (t) => {
