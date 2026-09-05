@@ -27,7 +27,6 @@ const RATE_TEXT = `操作太快了：这个聊天每分钟最多处理 ${RATE_MA
 const DA_TOKEN_URL = "https://www.deviantart.com/oauth2/token";
 const DA_API_BASE = "https://www.deviantart.com/api/v1/oauth2/";
 const DA_MINOR_VERSION = "20240701";
-const ARCHIVE_CDX = "https://web.archive.org/cdx/search/cdx";
 
 export default {
   async fetch(request, env) {
@@ -37,6 +36,13 @@ export default {
     }
     if (["GET", "HEAD"].includes(request.method) && url.pathname === "/media") {
       return proxyMedia(request, env);
+    }
+    if (request.method === "GET" && url.pathname === "/probe") {
+      // 运维诊断：验证各上游从 CF 出口的可达性（用 WEBHOOK_SECRET 作为探针密钥）。
+      if (request.headers.get("X-Probe-Key") !== env.WEBHOOK_SECRET) {
+        return new Response("Forbidden", { status: 403 });
+      }
+      return probeNetwork(env);
     }
     if (request.method !== "POST" || url.pathname !== "/webhook") {
       return new Response("Not found", { status: 404 });
@@ -295,18 +301,10 @@ async function resolveDeviationUuid(target, url, env) {
     throw new Error("这种旧式/短链链接暂无法解析（DeviantArt 已限制匿名转换）：请打开链接后把完整的作品页网址发给我。");
   }
   for (const page of candidates) {
-    const snapshot = await archiveTimestamp(page);
-    if (!snapshot) continue;
-    const html = await fetchText(`https://web.archive.org/web/${snapshot}id_/${page}`);
-    const clean = html.replace(/\\"/g, '"');
-    const needle = `"deviationExtended":{"${id}":{"deviationUuid":"`;
-    const start = clean.indexOf(needle);
-    if (start >= 0) {
-      const uuid = clean.slice(start + needle.length, start + needle.length + 36);
-      if (/^[0-9a-f-]{36}$/i.test(uuid)) {
-        await cacheSet("uuid", `d:${id}`, uuid, 30 * 24 * 3600); // UUID 恒定，长缓存
-        return uuid;
-      }
+    const uuid = await archiveUuidFromPage(page, id);
+    if (uuid) {
+      await cacheSet("uuid", `d:${id}`, uuid, 30 * 24 * 3600); // UUID 恒定，长缓存
+      return uuid;
     }
   }
   throw new Error("暂无法解析该作品：archive.org 还没有它的页面快照（作品可能太新），请稍后再试。");
@@ -324,29 +322,43 @@ function archivePageCandidates(url, username) {
   return [input, canonical].filter(Boolean);
 }
 
-async function archiveTimestamp(pageUrl) {
-  const key = pageUrl.replace(/^https?:\/\/(www\.)?/i, "").split("#")[0];
-  const data = await fetchJson(`${ARCHIVE_CDX}?url=${encodeURIComponent(key)}&output=json&limit=1&filter=statuscode:200&fl=timestamp`);
-  const timestamp = Array.isArray(data?.[1]) ? data[1][0] : null;
-  return /^\d{14}$/.test(String(timestamp)) ? timestamp : null;
-}
-
-async function fetchJson(url, timeoutMs = 20_000) {
-  const response = await fetch(url, { headers: DA_HEADERS, signal: AbortSignal.timeout(timeoutMs) });
+// 从 archive.org 的“最近一次快照”里解析作品页内嵌的 deviationUuid。
+// 用 /web/2/ 前缀让 replay 302 到最近快照（archive.org 的 CDX 索引对云出口限流 503，
+// 但快照 replay 本身可达）；UUID 以 {\"<数字id>\":{...}} 形式藏在 deviationExtended JSON 里。
+async function archiveUuidFromPage(pageUrl, numeric) {
+  const response = await guardedFetch(`https://web.archive.org/web/2/${pageUrl}`, {
+    headers: DA_HEADERS,
+    redirect: "follow",
+    signal: AbortSignal.timeout(30_000),
+  }, "archive.org 快照");
+  if (response.status === 404) {
+    response.body?.cancel();
+    return null; // 该页从未被收录
+  }
   if (!response.ok) {
     response.body?.cancel();
-    throw new Error(`上游请求失败（HTTP ${response.status}）`);
+    throw new Error(`archive.org 快照请求失败（HTTP ${response.status}）`);
   }
-  return response.json().catch(() => { throw new Error("上游返回了无效数据"); });
+  const html = await response.text();
+  // 页面 JSON 里引号被转义（\"），取一层还原后匹配；找不到再试其它层。
+  for (const text of [html, html.replace(/\\"/g, '"')]) {
+    const needle = `"deviationExtended":{"${numeric}":{"deviationUuid":"`;
+    const start = text.indexOf(needle);
+    if (start >= 0) {
+      const uuid = text.slice(start + needle.length, start + needle.length + 36);
+      if (/^[0-9a-f-]{36}$/i.test(uuid)) return uuid;
+    }
+  }
+  return null;
 }
 
-async function fetchText(url, timeoutMs = 30_000) {
-  const response = await fetch(url, { headers: DA_HEADERS, signal: AbortSignal.timeout(timeoutMs) });
-  if (!response.ok) {
-    response.body?.cancel();
-    throw new Error(`上游请求失败（HTTP ${response.status}）`);
+// 网络层异常统一转成带阶段的中文错误，便于用户反馈时定位是超时还是被拒。
+async function guardedFetch(url, init, label) {
+  try {
+    return await fetch(url, init);
+  } catch {
+    throw new Error(`${label}连接失败或超时，请稍后再试`);
   }
-  return response.text();
 }
 
 async function officialApiGet(env, path) {
@@ -357,7 +369,7 @@ async function officialApiGet(env, path) {
     ...DA_HEADERS,
     "dA-minor-version": DA_MINOR_VERSION,
   };
-  const response = await fetch(endpoint, { headers, signal: AbortSignal.timeout(20_000) });
+  const response = await guardedFetch(endpoint, { headers, signal: AbortSignal.timeout(20_000) }, "DeviantArt 官方 API");
   if (response.status === 401) {
     // token 失效：清缓存后按“无缓存”语义再取一次即可（下一请求会重新签发）。
     await cacheSet("api", "token", null, 1);
@@ -381,7 +393,7 @@ async function getOfficialToken(env) {
     client_id: env.CLIENT_ID,
     client_secret: env.CLIENT_SECRET,
   });
-  const response = await fetch(endpoint, { method: "POST", headers: DA_HEADERS, signal: AbortSignal.timeout(15_000) });
+  const response = await guardedFetch(endpoint, { method: "POST", headers: DA_HEADERS, signal: AbortSignal.timeout(15_000) }, "DeviantArt 官方 API");
   const data = await response.json().catch(() => null);
   if (!response.ok || !data?.access_token) {
     throw new Error("DeviantArt 官方 API 凭据无效或已被拒绝，请检查 CLIENT_ID/CLIENT_SECRET");
@@ -604,6 +616,67 @@ function extensionKind(value = "") {
   if (pathname.endsWith(".mp4")) return "video";
   if (/\.(?:jpe?g|png|webp|avif)$/.test(pathname)) return "photo";
   return null;
+}
+
+// 运维诊断：从当前出口实测关键上游的可达性（不再需要猜测卡在哪一跳）。
+async function probeNetwork(env) {
+  const jobs = [
+    ["da-api", "https://www.deviantart.com/api/v1/oauth2/placebo", "GET"],
+    ["archive-snapshot", "https://web.archive.org/web/2/https://www.deviantart.com/loish/art/underwater-913624585", "GET"],
+    ["wixmp", "https://images-wixmp-ed30a86b8c4ca887773594c2.wixmp.com/", "HEAD"],
+  ];
+  const probes = [];
+  for (const [name, target, method] of jobs) {
+    const start = Date.now();
+    try {
+      const response = await guardedFetch(target, {
+        method,
+        headers: DA_HEADERS,
+        redirect: "follow",
+        signal: AbortSignal.timeout(15_000),
+      }, name);
+      response.body?.cancel();
+      probes.push({ name, http: response.status, ms: Date.now() - start });
+    } catch (error) {
+      probes.push({ name, error: error instanceof Error ? error.message : String(error), ms: Date.now() - start });
+    }
+  }
+  if (env.CLIENT_ID && env.CLIENT_SECRET) {
+    try {
+      const token = await getOfficialToken(env);
+      probes.push({ name: "oauth-token", token: token ? "ok" : "missing", ms: 0 });
+    } catch (error) {
+      probes.push({ name: "oauth-token", error: error instanceof Error ? error.message : String(error) });
+    }
+    try {
+      const uuid = await archiveUuidFromPage("https://www.deviantart.com/loish/art/underwater-913624585", "913624585");
+      probes.push({ name: "uuid-map", uuid: uuid || null });
+      if (uuid) {
+        const token = await getOfficialToken(env);
+        const endpointProbes = [
+          ["deviation-upper", `deviation/${uuid}`],
+          ["metadata", `deviation/metadata?deviationids%5B%5D=${uuid}`],
+          ["download", `deviation/download/${uuid}`],
+          ["gallery", `gallery/all?username=loish&limit=1`],
+        ];
+        for (const [label, path] of endpointProbes) {
+          try {
+            const response = await guardedFetch(new URL(path, DA_API_BASE), {
+              headers: { Authorization: `Bearer ${token}`, ...DA_HEADERS, "dA-minor-version": DA_MINOR_VERSION },
+              signal: AbortSignal.timeout(20_000),
+            }, "DeviantArt 官方 API");
+            const body = (await response.text()).slice(0, 90);
+            probes.push({ name: label, http: response.status, body });
+          } catch (error) {
+            probes.push({ name: label, error: error instanceof Error ? error.message : String(error) });
+          }
+        }
+      }
+    } catch (error) {
+      probes.push({ name: "deviation-fetch", error: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  return Response.json({ ok: true, probes });
 }
 
 async function createProxyUrl(origin, upstream, secret) {

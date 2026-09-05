@@ -460,8 +460,8 @@ test("resolves artwork via official API and archive.org UUID mapping", async (t)
   await postMessage(env, 402, { ...base, message_id: 31, text: link });
 
   assert.equal(calls.token, 1); // token 跨消息缓存
-  assert.equal(calls.cdx, 1); // uuid 结果跨消息缓存，第二条约同一链接不再查存档
-  assert.equal(calls.snapshot, 1);
+  assert.equal(calls.cdx, 0); // 免 CDX 索引，直接请求快照 replay
+  assert.equal(calls.snapshot, 1); // uuid 已缓存，第二条相同链接不再查存档
   assert.equal(calls.deviation, 2);
   assert.equal(calls.telegram.length, 2);
   assert.match(calls.telegram[0].url, /sendPhoto$/);
