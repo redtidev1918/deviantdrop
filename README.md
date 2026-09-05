@@ -1,6 +1,6 @@
 # DeviantDrop
 
-把 DeviantArt 作品“丢”进 Telegram 的 Bot：在聊天里发一个 DeviantArt 单作品链接或 `fav.me` 短链，DeviantDrop 就把作品的图片、视频或 GIF 原样回复给你。运行在 Cloudflare Workers 上，无需自建服务器。
+把 DeviantArt 作品“丢”进 Telegram 的 Bot：在聊天里发一个 DeviantArt 单作品链接，DeviantDrop 就把作品的图片、视频或 GIF 原样回复给你。运行在 Cloudflare Workers 上，无需自建服务器。
 
 ## 支持范围
 
@@ -10,9 +10,11 @@ Bot 会同时检查普通消息和媒体 caption，并识别：
 - 没有协议的 `www.deviantart.com/...`、旧式 `作者.deviantart.com/...`。
 - Telegram `url` entity 和文字背后的 `text_link` 隐藏链接。
 - 同一消息中的多个链接；保持出现顺序、删除完全重复项，最多处理 5 个。
-- 当前作品页、旧式 `/view/{id}`、`view.php?id=...` 和 `fav.me` 短链。
+- 当前作品页（`作者.deviantart.com/art|journal/标题-数字id`）。
 
-不处理画廊、收藏夹、标签页、搜索结果、非 DeviantArt 直链、私密或付费作品。每个链接独立处理：一个失败不会阻止后续链接。
+解析链路：官方 OAuth API 只认 UUID，而作品页 URL 携带的是数字 id；数字→UUID 的公开映射只存在于作品页内嵌 JSON，DA 的网页对云出口封锁，因此该映射取自 [archive.org](https://web.archive.org) 对作品页的存档快照。**没有存档快照的新作品、以及无法定位作品页的旧式链接（`fav.me`、`/view/{id}`、`view.php?id=`）会得到明确的中文提示**——把短链在浏览器打开后复制完整作品页网址即可。私密/付费/成熟且需登录的作品受官方 API 限制，同样会提示。
+
+不处理画廊、收藏夹、标签页、搜索结果、非 DeviantArt 直链。每个链接独立处理：一个失败不会阻止后续链接。
 
 ## 命令与交互
 
@@ -26,15 +28,18 @@ Bot 会同时检查普通消息和媒体 caption，并识别：
 
 1. 校验 Telegram webhook secret 和可选用户白名单。
 2. 从消息正文/caption 及 Telegram entities 中收集、规范化并去重链接。
-3. 每条消息只请求一次 DeviantArt 首页，复用匿名 session cookie 和 CSRF token。
-4. 解析每个作品的最佳公开媒体：最高分辨率 MP4、完整图片或 GIF。
-5. 生成 15 分钟有效的 HMAC 签名媒体 URL。Telegram 经 Worker 流式读取 DeviantArt CDN；Worker 不缓存完整文件，并支持视频 Range 请求。
+3. 用官方 OAuth API 的 `client_credentials` 换 access token（跨消息缓存约 1 小时）。
+4. 数字作品 id → 经 archive.org 存档快照解析出 UUID（结果长期缓存）；找不到快照时给出中文提示。
+5. 按 UUID 调官方 API 取作品：优先原图/原文件下载端点，回落 `content`/`preview` 媒体地址。
+6. 生成 15 分钟有效的 HMAC 签名媒体 URL。Telegram 经 Worker 流式读取 DeviantArt CDN；Worker 不缓存完整文件，并支持视频 Range 请求。
+
+（未配置官方凭据时自动退回网页 `_puppy/dadeviation/init` 路径——该路径依赖未被 DeviantArt 封禁的出口 IP，仅适合本机/自建服务器部署。）
 
 ## 限流与可靠性
 
-不存在合法的“绕过 DeviantArt 限额”。DeviantArt 使用自适应限流；Bot 对网络错误、HTTP 429、500 和 503 最多重试两次并指数退避，并把匿名 session（CSRF/cookie）在消息之间缓存复用 10 分钟——无论来自哪个聊天，同一时间窗内只向 DeviantArt 首页请求一次，显著降低总量。持续高并发时应接入 Cloudflare Queue，并按 DeviantArt 官方 API/OAuth 规则访问，不能通过轮换 IP 或并发轰炸规避限制。
+不存在合法的“绕过 DeviantArt 限额”。官方 API 按应用配额与自适应限流；Bot 对网络错误、HTTP 429、500 和 503 会退避重试，token 与 UUID 映射在消息之间缓存复用，显著降低请求总量。持续高并发时应接入 Cloudflare Queue，不能通过轮换 IP 或并发轰炸规避限制。
 
-当前版本为免配置 DeviantArt 凭据，沿用参考项目的网页公开 `_puppy/dadeviation/init` 接口；它不是稳定的官方 API 合约，DeviantArt 改版时可能失效。要求长期生产稳定性或访问用户授权内容时，应注册 DeviantArt 应用并改用 OAuth API，仍须遵守其自适应限流。
+DA 网页面（含 `_puppy` 内部接口）对其认为是数据中心的出口 IP 段返回 403，Cloudflare Workers 与多数云主机都被封锁；官方 OAuth API（`/oauth2/token`、`/api/v1/oauth2/*`）与媒体 CDN（wixmp）对云出口放行，这就是本 Bot 必须配置官方凭据的原因。
 
 Telegram 单会话也可能触发 429；Bot 会读取 `retry_after` 并重试一次。以下情况会直接回复用户可理解的错误：
 
@@ -62,6 +67,15 @@ npx wrangler login
 npx wrangler secret put BOT_TOKEN
 npx wrangler secret put WEBHOOK_SECRET
 npm run deploy
+```
+
+### 配置 DeviantArt 官方 API（必需）
+
+DA 的网页接口对云出口封锁，本 Bot 依赖官方 OAuth API。需要一个 DeviantArt 账号，在 [deviantart.com/developers](https://www.deviantart.com/developers/) 注册 App（Client type 选 **Confidential**），拿到 Client ID / Client Secret 后写入 secrets（不需要把它们写进任何代码或仓库）：
+
+```bash
+npx wrangler secret put CLIENT_ID
+npx wrangler secret put CLIENT_SECRET
 ```
 
 `WEBHOOK_SECRET` 只能使用字母、数字、下划线和连字符。可用 `openssl rand -hex 32` 生成。部署后注册 Telegram webhook：

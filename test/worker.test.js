@@ -416,3 +416,79 @@ test("limits how many links one chat may process per minute", async (t) => {
   assert.match(calls.telegram.at(-1).body.text, /操作太快/);
   assert.equal(calls.telegram.at(-1).url.endsWith("sendMessage"), true);
 });
+
+test("resolves artwork via official API and archive.org UUID mapping", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const calls = { token: 0, cdx: 0, snapshot: 0, deviation: 0, telegram: [] };
+  const UUID = "4141C2B4-BCA1-2A3E-7241-3FCFB091BA69";
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url.startsWith("https://www.deviantart.com/oauth2/token")) {
+      calls.token += 1;
+      return Response.json({ access_token: "tok", expires_in: 3600 });
+    }
+    if (url.startsWith("https://web.archive.org/cdx/search/cdx")) {
+      calls.cdx += 1;
+      return Response.json([["timestamp", "statuscode"], ["20260105154201", "200"]]);
+    }
+    if (url.includes("web.archive.org/web/")) {
+      calls.snapshot += 1;
+      return new Response(`window stuff \\"deviationExtended\\":{\\"913624585\\":{\\"deviationUuid\\":\\"${UUID}\\",\\"canUserAddToGroup\\":true} more`);
+    }
+    if (url.includes("/api/v1/oauth2/deviation/")) {
+      calls.deviation += 1;
+      return Response.json({
+        title: "underwater",
+        author: { username: "loish" },
+        is_downloadable: false,
+        content: { src: "https://images.wixmp.com/work.png" },
+      });
+    }
+    if (url.includes("api.telegram.org")) {
+      calls.telegram.push({ url, body: JSON.parse(init.body) });
+      return Response.json({ ok: true, result: {} });
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  t.after(installFakeCache());
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  const env = { BOT_TOKEN: "111:secret", WEBHOOK_SECRET: "secret", CLIENT_ID: "1", CLIENT_SECRET: "s" };
+  const base = { from: { id: 42 }, chat: { id: 700, type: "private" } };
+  const link = "https://www.deviantart.com/loish/art/underwater-913624585";
+  await postMessage(env, 401, { ...base, message_id: 30, text: link });
+  await postMessage(env, 402, { ...base, message_id: 31, text: link });
+
+  assert.equal(calls.token, 1); // token 跨消息缓存
+  assert.equal(calls.cdx, 1); // uuid 结果跨消息缓存，第二条约同一链接不再查存档
+  assert.equal(calls.snapshot, 1);
+  assert.equal(calls.deviation, 2);
+  assert.equal(calls.telegram.length, 2);
+  assert.match(calls.telegram[0].url, /sendPhoto$/);
+  assert.match(calls.telegram[0].body.caption, /deviantart\.com\/loish\/art\/underwater-913624585/);
+});
+
+test("explains that fav.me short links need a canonical page URL on the official path", async (t) => {
+  const originalFetch = globalThis.fetch;
+  let notice;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url.startsWith("https://www.deviantart.com/oauth2/token")) {
+      return Response.json({ access_token: "tok", expires_in: 3600 });
+    }
+    if (url.includes("api.telegram.org")) {
+      notice = JSON.parse(init.body).text;
+      return Response.json({ ok: true, result: {} });
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  t.after(installFakeCache());
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  const env = { BOT_TOKEN: "111:secret", WEBHOOK_SECRET: "secret", CLIENT_ID: "1", CLIENT_SECRET: "s" };
+  await postMessage(env, 403, {
+    from: { id: 42 }, chat: { id: 701, type: "private" }, message_id: 40,
+    text: "https://fav.me/dabc123",
+  });
+  assert.match(notice, /旧式\/短链/);
+});

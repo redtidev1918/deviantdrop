@@ -1,10 +1,12 @@
 const TELEGRAM_API = "https://api.telegram.org";
 const DEVIANTART = "https://www.deviantart.com/";
-const USER_AGENT = "deviantdrop/1.0";
+// 浏览器 UA：DeviantArt 的 WAF 会拦明显的爬虫 UA（尤其是数据中心出口 IP）。
+const USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 const MAX_LINKS = 5;
 const DA_HEADERS = {
   "Accept-Encoding": "gzip, br",
   "User-Agent": USER_AGENT,
+  "Accept-Language": "en-US,en;q=0.9",
 };
 const encoder = new TextEncoder();
 
@@ -20,6 +22,12 @@ const GROUP_DEDUPE_SECONDS = 60; // 同一相册只处理第一条带链接的�
 const RATE_WINDOW_MS = 60_000;
 const RATE_MAX_LINKS = 15; // 每个聊天每分钟最多处理的链接数
 const RATE_TEXT = `操作太快了：这个聊天每分钟最多处理 ${RATE_MAX_LINKS} 个作品链接，请稍后再试。`;
+
+// —— 官方 OAuth API（DA 的 WAF 按出口 IP 封锁网页接口，官方 API 面放行；部署必须走这条）——
+const DA_TOKEN_URL = "https://www.deviantart.com/oauth2/token";
+const DA_API_BASE = "https://www.deviantart.com/api/v1/oauth2/";
+const DA_MINOR_VERSION = "20240701";
+const ARCHIVE_CDX = "https://web.archive.org/cdx/search/cdx";
 
 export default {
   async fetch(request, env) {
@@ -132,10 +140,13 @@ async function handleMessage(message, env, origin) {
   const budget = await takeLinkBudget(message.chat.id, selected.length);
   const pending = selected.slice(0, budget);
   if (pending.length > 0) {
-    const session = await getDeviantArtSession();
+    // 配置了官方 API 凭据时走官方解析（Workers 出口被 DA 网页 WAF 拦截）；
+    // 否则退回网页 session 路径（本地/自建出口可用）。
+    const useOfficial = Boolean(env.CLIENT_ID && env.CLIENT_SECRET);
+    const session = useOfficial ? null : await getDeviantArtSession();
     for (let index = 0; index < pending.length; index += 1) {
       try {
-        await sendDeviantArt(new URL(pending[index]), message, env, origin, session);
+        await sendDeviantArt(new URL(pending[index]), message, env, origin, session, useOfficial);
       } catch (error) {
         await telegram(env, "sendMessage", {
           chat_id: message.chat.id,
@@ -232,11 +243,14 @@ async function createDeviantArtSession() {
   return { csrf, cookies: getCookies(home.headers) };
 }
 
-async function sendDeviantArt(url, message, env, origin, session) {
+async function sendDeviantArt(url, message, env, origin, session, useOfficial = false) {
+  if (useOfficial) return sendDeviantArtOfficial(url, message, env, origin);
   const target = parseDeviantArtTarget(url);
   const endpoint = new URL("/_puppy/dadeviation/init", DEVIANTART);
   endpoint.searchParams.set("deviationid", target.id);
   if (target.username) endpoint.searchParams.set("username", target.username);
+  // 该接口自 2026 年起把 type 列为必填（art/journal 等枚举值），缺失会返回 400。
+  endpoint.searchParams.set("type", "art");
   endpoint.searchParams.set("include_session", "false");
   endpoint.searchParams.set("csrf_token", session.csrf);
   endpoint.searchParams.set("mature_content", "true");
@@ -249,6 +263,151 @@ async function sendDeviantArt(url, message, env, origin, session) {
   const item = extractDeviantArtMedia(data.deviation);
   const mediaUrl = await createProxyUrl(origin, item.url, env.WEBHOOK_SECRET);
   await sendOne(item.kind, mediaUrl, `${item.title}\n${url.href}`, message, env);
+}
+
+// —— 官方 OAuth API 解析路径（数字 id → archive.org 快照里的 UUID → deviation 取媒体）——
+
+async function sendDeviantArtOfficial(url, message, env, origin) {
+  const target = parseDeviantArtTarget(url);
+  const uuid = await resolveDeviationUuid(target, url, env);
+  const deviation = await officialApiGet(env, `deviation/${uuid}`);
+  const mediaUrl = await pickOfficialMediaUrl(env, deviation, uuid);
+  if (!mediaUrl) throw new Error("作品没有可用的公开媒体");
+  const title = deviation?.title || "DeviantArt";
+  const author = deviation?.author?.username;
+  const proxied = await createProxyUrl(origin, mediaUrl, env.WEBHOOK_SECRET);
+  const kind = extensionKind(mediaUrl) || "photo";
+  await sendOne(kind, proxied, `${title}${author ? ` — ${author}` : ""}\n${url.href}`, message, env);
+}
+
+// 数字作品 id → UUID。官方 API 只认 UUID；唯一已知的公开映射藏在作品页内嵌 JSON 里，
+// 而 DA 网页对云出口封锁——archive.org 的快照里保留了这份映射（deviationExtended.<数字>.deviationUuid）。
+async function resolveDeviationUuid(target, url, env) {
+  const { id, username } = target;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) return id;
+
+  const cached = await cacheGet("uuid", `d:${id}`);
+  if (cached) return cached;
+
+  // 需要作品页规范链接（作者+slug）才能定位存档；fav.me/view 之类没有 slug 的旧链给明确提示。
+  const candidates = archivePageCandidates(url, username);
+  if (candidates.length === 0) {
+    throw new Error("这种旧式/短链链接暂无法解析（DeviantArt 已限制匿名转换）：请打开链接后把完整的作品页网址发给我。");
+  }
+  for (const page of candidates) {
+    const snapshot = await archiveTimestamp(page);
+    if (!snapshot) continue;
+    const html = await fetchText(`https://web.archive.org/web/${snapshot}id_/${page}`);
+    const clean = html.replace(/\\"/g, '"');
+    const needle = `"deviationExtended":{"${id}":{"deviationUuid":"`;
+    const start = clean.indexOf(needle);
+    if (start >= 0) {
+      const uuid = clean.slice(start + needle.length, start + needle.length + 36);
+      if (/^[0-9a-f-]{36}$/i.test(uuid)) {
+        await cacheSet("uuid", `d:${id}`, uuid, 30 * 24 * 3600); // UUID 恒定，长缓存
+        return uuid;
+      }
+    }
+  }
+  throw new Error("暂无法解析该作品：archive.org 还没有它的页面快照（作品可能太新），请稍后再试。");
+}
+
+// 用于 CDX 查询的作品页 URL 候选。fav.me、/view、view.php 之类没有作者/slug 的
+// 旧式链接无法在 archive.org 定位存档页，返回空数组由调用方给明确提示。
+function archivePageCandidates(url, username) {
+  if (!username) return [];
+  const input = url.href.split("#")[0];
+  const host = url.hostname.toLowerCase();
+  const isLegacySubdomain = host.endsWith(".deviantart.com") &&
+    !["www", "m", "fav"].includes(host.split(".")[0]) && host !== "deviantart.com";
+  const canonical = isLegacySubdomain ? `https://www.deviantart.com/${username}${url.pathname}` : null;
+  return [input, canonical].filter(Boolean);
+}
+
+async function archiveTimestamp(pageUrl) {
+  const key = pageUrl.replace(/^https?:\/\/(www\.)?/i, "").split("#")[0];
+  const data = await fetchJson(`${ARCHIVE_CDX}?url=${encodeURIComponent(key)}&output=json&limit=1&filter=statuscode:200&fl=timestamp`);
+  const timestamp = Array.isArray(data?.[1]) ? data[1][0] : null;
+  return /^\d{14}$/.test(String(timestamp)) ? timestamp : null;
+}
+
+async function fetchJson(url, timeoutMs = 20_000) {
+  const response = await fetch(url, { headers: DA_HEADERS, signal: AbortSignal.timeout(timeoutMs) });
+  if (!response.ok) {
+    response.body?.cancel();
+    throw new Error(`上游请求失败（HTTP ${response.status}）`);
+  }
+  return response.json().catch(() => { throw new Error("上游返回了无效数据"); });
+}
+
+async function fetchText(url, timeoutMs = 30_000) {
+  const response = await fetch(url, { headers: DA_HEADERS, signal: AbortSignal.timeout(timeoutMs) });
+  if (!response.ok) {
+    response.body?.cancel();
+    throw new Error(`上游请求失败（HTTP ${response.status}）`);
+  }
+  return response.text();
+}
+
+async function officialApiGet(env, path) {
+  const endpoint = new URL(path, DA_API_BASE);
+  endpoint.searchParams.set("mature_content", "true");
+  const headers = {
+    Authorization: `Bearer ${await getOfficialToken(env)}`,
+    ...DA_HEADERS,
+    "dA-minor-version": DA_MINOR_VERSION,
+  };
+  const response = await fetch(endpoint, { headers, signal: AbortSignal.timeout(20_000) });
+  if (response.status === 401) {
+    // token 失效：清缓存后按“无缓存”语义再取一次即可（下一请求会重新签发）。
+    await cacheSet("api", "token", null, 1);
+    throw new Error("DeviantArt 会话已过期，请再试一次");
+  }
+  if (response.status === 404) throw new Error("作品不存在、已删除或链接无效");
+  if (response.status === 403) throw new Error("作品需要登录、无权访问，或 DeviantArt 拒绝了请求");
+  if (response.status === 429) throw new Error("DeviantArt 暂时限流，请稍后重试");
+  if (!response.ok) throw new Error(`DeviantArt 请求失败（HTTP ${response.status}）`);
+  const data = await response.json().catch(() => null);
+  if (!data || typeof data !== "object") throw new Error("DeviantArt 返回了无效数据");
+  return data;
+}
+
+async function getOfficialToken(env) {
+  const cached = await cacheGet("api", "token");
+  if (cached?.token) return cached.token;
+  const endpoint = new URL(DA_TOKEN_URL);
+  endpoint.search = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_id: env.CLIENT_ID,
+    client_secret: env.CLIENT_SECRET,
+  });
+  const response = await fetch(endpoint, { method: "POST", headers: DA_HEADERS, signal: AbortSignal.timeout(15_000) });
+  const data = await response.json().catch(() => null);
+  if (!response.ok || !data?.access_token) {
+    throw new Error("DeviantArt 官方 API 凭据无效或已被拒绝，请检查 CLIENT_ID/CLIENT_SECRET");
+  }
+  const ttl = Math.max(120, Number(data.expires_in ?? 3600) - 60);
+  await cacheSet("api", "token", { token: data.access_token }, ttl);
+  return data.access_token;
+}
+
+// 媒体选择：优先官方原图下载端点（含 mp4/gif 原文件），失败回落到 content/preview 地址。
+async function pickOfficialMediaUrl(env, deviation, uuid) {
+  const downloadable = deviation?.is_downloadable === true;
+  if (downloadable) {
+    try {
+      const download = await officialApiGet(env, `deviation/download/${uuid}`);
+      if (download?.src) return download.src;
+    } catch {
+      // 订阅限制等场景下拿不到原图：落到 content
+    }
+  }
+  const content = deviation?.content?.src;
+  const preview = deviation?.preview?.src;
+  if (content) return content;
+  const thumbs = deviation?.thumbs;
+  if (Array.isArray(thumbs) && thumbs.length) return thumbs[0]?.src || thumbs.at(-1)?.src;
+  return preview || null;
 }
 
 async function sendOne(kind, mediaUrl, caption, message, env) {
@@ -496,7 +655,10 @@ async function proxyMedia(request, env) {
   });
   if (!response.ok) {
     response.body?.cancel();
-    return new Response("Upstream error", { status: 502 });
+    // 透传上游状态码（403/404/429…），便于诊断与让 Telegram 侧区分失败原因；
+    // 5xx 统一折叠成 502，避免把网关故障误报成内容问题。
+    const status = response.status >= 500 ? 502 : response.status;
+    return new Response("Upstream error", { status });
   }
   const finalUrl = new URL(response.url || url);
   if (!isSafePublicUrl(finalUrl) || !isMediaHost(finalUrl.hostname)) {
