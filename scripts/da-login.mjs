@@ -9,6 +9,10 @@
 // 里加入：http://127.0.0.1:8787/callback （本地回环地址；这一步只需一次）。
 import { createServer } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const AUTHORIZE = "https://www.deviantart.com/oauth2/authorize";
 const TOKEN = "https://www.deviantart.com/oauth2/token";
@@ -78,10 +82,20 @@ const tokenParams = new URLSearchParams({
 });
 if (clientSecret) tokenParams.set("client_secret", clientSecret);
 
-const response = await fetch(TOKEN, { method: "POST", body: tokenParams });
-const data = await response.json().catch(() => null);
-if (!response.ok || !data?.refresh_token) {
-  console.error("换取 token 失败:", response.status, data?.error_description || data?.error || "");
+// 用 curl 换 token：本机 node fetch 对 deviantart.com 偶发走错代理超时，curl 稳定。
+let raw = "";
+try {
+  const result = await execFileAsync("curl", [
+    "-sS", "-m", "60", "-X", "POST", TOKEN,
+    "--data", tokenParams.toString(),
+  ], { maxBuffer: 1024 * 1024 });
+  raw = result.stdout;
+} catch (error) {
+  raw = (error && error.stdout) || "";
+}
+const data = JSON.parse(raw || "{}");
+if (!data?.refresh_token) {
+  console.error("换取 token 失败:", data?.error_description || data?.error || raw || "(空响应)");
   process.exit(1);
 }
 
