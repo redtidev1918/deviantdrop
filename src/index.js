@@ -732,6 +732,7 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null) 
     for (let i = 0; i < entries.length; i += 1) {
       const { bytes, extension } = entries[i];
       const form = mediaForm("photo");
+      console.error("[album-photo] i=%d bytes=%d ext=%s", i, bytes.length, extension);
       form.set("photo", new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `photo${i}.${extension}`);
       form.set("media_group_id", groupId);
       if (i === 0) form.set("caption", fullCaption);
@@ -882,6 +883,7 @@ async function uploadMedia(env, kind, mediaUrl, caption, message, onStatus = nul
     extension = "jpg";
     captionText = `${captionText}（原图额度受限，已用最高清展示图替代）`;
   }
+  if (kind === "photo") console.error("[photo] bytes=%d ext=%s sendAs=%s", bytes.length, extension, sendAs);
   const makeForm = (field) => {
     const form = new FormData();
     form.set("chat_id", String(message.chat.id));
