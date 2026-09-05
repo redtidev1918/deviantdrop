@@ -429,8 +429,8 @@ test("resolves artwork via official API and archive.org UUID mapping", async (t)
   globalThis.fetch = async (input, init = {}) => {
     const url = String(input);
     if (url === "https://www.deviantart.com/") {
-      // 网页出口被封：级联应落到官方 API 路径
-      return new Response("blocked", { status: 403 });
+      // 网页出口被封（连接失败）：级联应落到官方 API 路径
+      throw new Error("无法连接 DeviantArt，请稍后重试");
     }
     if (url.startsWith("https://www.deviantart.com/oauth2/token")) {
       calls.token += 1;
@@ -484,8 +484,8 @@ test("explains that fav.me short links need a canonical page URL on the official
   globalThis.fetch = async (input, init = {}) => {
     const url = String(input);
     if (url === "https://www.deviantart.com/") {
-      // 网页出口被封：级联应落到官方 API 路径
-      return new Response("blocked", { status: 403 });
+      // 网页出口被封（连接失败）：级联应落到官方 API 路径
+      throw new Error("无法连接 DeviantArt，请稍后重试");
     }
     if (url.startsWith("https://www.deviantart.com/oauth2/token")) {
       return Response.json({ access_token: "tok", expires_in: 3600 });

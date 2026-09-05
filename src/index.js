@@ -292,14 +292,17 @@ async function createDeviantArtSession() {
 async function sendDeviantArt(url, message, env, origin, sessionMemo = {}) {
   try {
     const media = await resolveWebMedia(url, env, origin, sessionMemo);
-    await sendOne(media.kind, media.url, `${media.title}\n${url.href}`, message, env);
+    await sendOne(media.kind, media.url, `${media.title}\n${url.href}`, message, env, !origin);
     return;
   } catch (error) {
-    if (!env.CLIENT_ID || !env.CLIENT_SECRET) throw error;
-    console.error("网页解析失败，转官方 API:", error instanceof Error ? error.message : String(error));
+    const text = error instanceof Error ? error.message : String(error);
+    // 只有“网络/超时”类失败才值得换官方通道重试；403/404/内容类错误如实抛出，
+    // 否则会把“需要登录/未收录”误报成存档缺失。
+    if (!env.CLIENT_ID || !env.CLIENT_SECRET || !/连接失败|超时|无法连接/.test(text)) throw error;
+    console.error("网页解析失败(网络)，转官方 API:", text);
   }
   const official = await resolveOfficialMedia(url, env, origin);
-  await sendOne(official.kind, official.url, `${official.title}\n${url.href}`, message, env);
+  await sendOne(official.kind, official.url, `${official.title}\n${url.href}`, message, env, !origin);
 }
 
 async function resolveWebMedia(url, env, origin, sessionMemo) {
@@ -481,19 +484,78 @@ async function pickOfficialMediaUrl(env, deviation, uuid) {
   return preview || null;
 }
 
-async function sendOne(kind, mediaUrl, caption, message, env) {
+async function sendOne(kind, mediaUrl, caption, message, env, upload = false) {
   const fields = {
     photo: ["sendPhoto", "photo"],
     video: ["sendVideo", "video"],
     animation: ["sendAnimation", "animation"],
   }[kind];
   if (!fields) throw new Error("不支持的媒体类型");
+  const text = String(caption).slice(0, 1024);
+  if (upload) {
+    // 轮询模式：Telegram 服务器拉不动 wixmp（需 Referer/UA），由 Bot 先下载再上传。
+    await uploadMedia(env, fields[0], fields[1], mediaUrl, text, message);
+    return;
+  }
   await telegram(env, fields[0], {
     chat_id: message.chat.id,
     [fields[1]]: mediaUrl,
-    caption: String(caption).slice(0, 1024),
+    caption: text,
     reply_parameters: { message_id: message.message_id },
   });
+}
+
+// 下载媒体并作为 multipart 文件上传给 Telegram（带 DA 所需 Referer/UA，规避 Telegram 拉不动）。
+async function uploadMedia(env, method, field, mediaUrl, caption, message) {
+  const response = await guardedFetch(mediaUrl, {
+    headers: { ...DA_HEADERS, Referer: DEVIANTART },
+    signal: AbortSignal.timeout(120_000),
+  }, "媒体下载");
+  if (!response.ok) {
+    response.body?.cancel();
+    throw new Error(`媒体下载失败（HTTP ${response.status}）`);
+  }
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  const extension = guessExtension(mediaUrl, field);
+  const form = new FormData();
+  form.set("chat_id", String(message.chat.id));
+  form.set("caption", caption);
+  form.set("reply_parameters", JSON.stringify({ message_id: message.message_id }));
+  form.set(field, new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `${field}.${extension}`);
+  await telegramForm(env, method, form);
+}
+
+async function telegramForm(env, method, form) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await fetch(`${TELEGRAM_API}/bot${env.BOT_TOKEN}/${method}`, {
+      method: "POST",
+      body: form,
+      signal: AbortSignal.timeout(120_000),
+    });
+    const result = await response.json().catch(() => null);
+    const retryAfter = Number(result?.parameters?.retry_after);
+    if (response.status === 429 && retryAfter > 0 && attempt === 0) {
+      await sleep(Math.min(retryAfter, 10) * 1000);
+      continue;
+    }
+    if (!response.ok || !result?.ok) {
+      throw new Error(result?.description || `Telegram 返回 HTTP ${response.status}`);
+    }
+    return result.result;
+  }
+  throw new Error("Telegram 暂时限流，请稍后重试");
+}
+
+const MIME_BY_EXTENSION = {
+  jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp",
+  gif: "image/gif", mp4: "video/mp4", m4v: "video/mp4",
+};
+
+function guessExtension(mediaUrl, kind) {
+  const leaf = new URL(mediaUrl).pathname.split("/").pop() || "";
+  const ext = leaf.includes(".") ? leaf.split(".").pop().toLowerCase() : "";
+  if (/^[a-z0-9]{2,5}$/.test(ext)) return ext;
+  return { photo: "jpg", video: "mp4", animation: "gif" }[kind] || "bin";
 }
 
 async function telegram(env, method, body) {
