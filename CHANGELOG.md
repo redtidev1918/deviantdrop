@@ -12,6 +12,10 @@
 
 ## [Unreleased]
 
+### 部署形态变更
+- **Cloudflare Workers 形态不可用**：DeviantArt 对数据中心出口封锁（Workers 实测：网页 403、官方 API 数据面 500、媒体 CDN 需要只由被拦数据面签发的新鲜 token），已删除 Workers 部署并重置 Telegram webhook。
+- 改为主推 **Node 版跑在 DA 放行的出口**（住宅网络/已检测通过的 VPS）：新增 `src/main.js`（Node 入口，进程内缓存去重/限流）与 `scripts/detect-da.mjs`（30 秒出口检测），部署步骤见 `docs/VPS.md`。官方 API 数据面可达的机器填 `CLIENT_ID`/`CLIENT_SECRET`；仅网页可达则不填，自动回退匿名网页路径。
+
 ### 新增
 - `/about` 命令：回复项目介绍并附 GitHub 源码仓库链接；`/start`、`/help` 保留用法说明，`/help` 里也会指向 `/about`。
 - 每条媒体回复的说明文字都带原作品页链接（Telegram 自动可点击），可直接回到原页面查看或确认作者。

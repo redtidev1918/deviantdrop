@@ -1,6 +1,8 @@
 # DeviantDrop
 
-把 DeviantArt 作品“丢”进 Telegram 的 Bot：在聊天里发一个 DeviantArt 单作品链接，DeviantDrop 就把作品的图片、视频或 GIF 原样回复给你。运行在 Cloudflare Workers 上，无需自建服务器。
+把 DeviantArt 作品“丢”进 Telegram 的 Bot：在聊天里发一个 DeviantArt 单作品链接，DeviantDrop 就把作品的图片、视频或 GIF 原样回复给你。
+
+> ⚠️ **部署形态**：DeviantArt 会封锁数据中心出口（Cloudflare Workers 与多数云主机的页面/API 数据面均被拦，见 [docs/VPS.md](docs/VPS.md) 的检测结论）。请把 Bot 跑在 **DeviantArt 放行的出口**（住宅网络或已检测通过的部分 VPS）上——Node 版部署步骤见 [docs/VPS.md](docs/VPS.md)。本仓库同时保留 Workers 形态代码，仅适合自建/未被封禁的出口。
 
 ## 支持范围
 
