@@ -213,3 +213,82 @@ test("backs off and retries a DeviantArt 429", async (t) => {
 
   assert.equal(homeCalls, 2);
 });
+
+test("answers /about, parses media captions, and ignores link-less or own-forwarded messages", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  let initCalls = 0;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url === "https://www.deviantart.com/") {
+      return new Response("window.__CSRF_TOKEN__ = 'csrf'");
+    }
+    if (url.includes("/_puppy/dadeviation/init")) {
+      initCalls += 1;
+      return Response.json({ deviation: { title: "作品", media: { baseUri: "https://images.wixmp.com/work.jpg" } } });
+    }
+    if (url.includes("api.telegram.org")) {
+      calls.push({ url, body: JSON.parse(init.body) });
+      return Response.json({ ok: true, result: {} });
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  const env = { BOT_TOKEN: "111:secret", WEBHOOK_SECRET: "secret" };
+  const send = async (message) => {
+    const before = calls.length;
+    const initBefore = initCalls;
+    const response = await worker.fetch(new Request("https://worker.test/webhook", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "secret" },
+      body: JSON.stringify({ message }),
+    }), env);
+    assert.equal(response.status, 200);
+    return { replies: calls.slice(before), downloads: initCalls - initBefore };
+  };
+
+  // /about：回复指向源码仓库。
+  const about = await send({
+    message_id: 1, from: { id: 42 }, chat: { id: 42, type: "private" }, text: "/about",
+  });
+  assert.equal(about.replies.length, 1);
+  assert.match(about.replies[0].body.text, /github\.com\/redtidev1918\/deviantdrop/);
+
+  // 图片 + caption 带链接：照常解析并下载。
+  const caption = await send({
+    message_id: 2, from: { id: 42 }, chat: { id: 42, type: "private" },
+    caption: "看看这幅 https://www.deviantart.com/artist/art/work-123",
+    photo: [{ file_id: "f" }],
+  });
+  assert.equal(caption.downloads, 1);
+  assert.equal(caption.replies.length, 1);
+  assert.match(caption.replies[0].url, /sendPhoto$/);
+  assert.match(caption.replies[0].body.caption, /deviantart\.com\/artist\/art\/work-123/);
+
+  // 无 caption 的图片：静默忽略。
+  const plain = await send({
+    message_id: 3, from: { id: 42 }, chat: { id: 42, type: "private" }, photo: [{ file_id: "f" }],
+  });
+  assert.equal(plain.replies.length, 0);
+
+  // 转发自 Bot 自己的消息：即使带链接也忽略，不再重复下载。
+  const ownForward = await send({
+    message_id: 4, from: { id: 42 }, chat: { id: 42, type: "private" },
+    text: "https://www.deviantart.com/artist/art/work-123",
+    forward_origin: { type: "user", sender_user: { id: 111 } },
+  });
+  assert.equal(ownForward.replies.length, 0);
+  assert.equal(ownForward.downloads, 0);
+
+  // 私聊纯文字（无链接）：给用法提示；群聊闲聊：保持安静。
+  const privateChat = await send({
+    message_id: 5, from: { id: 42 }, chat: { id: 42, type: "private" }, text: "你好",
+  });
+  assert.equal(privateChat.replies.length, 1);
+  assert.match(privateChat.replies[0].body.text, /没有找到/);
+  const groupChat = await send({
+    message_id: 6, from: { id: 43 }, chat: { id: -1, type: "group" }, text: "闲聊一下",
+  });
+  assert.equal(groupChat.replies.length, 0);
+});

@@ -14,6 +14,14 @@ Bot 会同时检查普通消息和媒体 caption，并识别：
 
 不处理画廊、收藏夹、标签页、搜索结果、非 DeviantArt 直链、私密或付费作品。每个链接独立处理：一个失败不会阻止后续链接。
 
+## 命令与交互
+
+- `/start`、`/help`：查看用法。
+- `/about`：项目介绍与源码仓库（github.com/redtidev1918/deviantdrop，聊天里直接可点）。
+- 图片/视频的 caption 里带 DeviantArt 链接同样会被解析下载；不带 caption 的图片、贴纸等消息会被静默忽略。
+- 每条媒体回复的 caption 都会附带原作品页链接（Telegram 自动使其可点击），方便回原页查看或确认作者。
+- 转发自 Bot 自己的消息会被忽略，不会把 caption 里的来源链接再重复下载一遍。
+
 ## 工作方式
 
 1. 校验 Telegram webhook secret 和可选用户白名单。
@@ -63,6 +71,14 @@ curl -fsS "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
   --data-urlencode 'max_connections=1'
 ```
 
+让 `/start`、`/help`、`/about` 出现在聊天输入框的「/」菜单里（用 @BotFather 创建 Bot 后执行一次即可）：
+
+```bash
+curl -fsS "https://api.telegram.org/bot${BOT_TOKEN}/setMyCommands" \
+  -H 'Content-Type: application/json' \
+  -d '[{"command":"start","description":"开始使用"},{"command":"help","description":"查看用法"},{"command":"about","description":"项目介绍与源码仓库"}]'
+```
+
 Bot 默认允许所有用户。私有 Bot 应配置逗号分隔的 Telegram user id：
 
 ```bash
@@ -80,7 +96,7 @@ curl -fsS "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo"
 npx wrangler tail
 ```
 
-健康检查应返回 `{"ok":true,"service":"deviantdrop"}`。测试覆盖链接实体、多链接/session 复用、图片/视频/GIF 分类、404 用户提示、webhook 鉴权和签名媒体代理。
+健康检查应返回 `{"ok":true,"service":"deviantdrop"}`。测试覆盖链接实体、多链接/session 复用、图片/视频/GIF 分类、404 用户提示、webhook 鉴权、签名媒体代理，以及 `/about` 命令、媒体 caption 解析和无链接消息/转发自己消息的忽略规则。
 
 ## 实现来源
 

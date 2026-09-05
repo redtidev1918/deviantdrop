@@ -8,6 +8,11 @@ const DA_HEADERS = {
 };
 const encoder = new TextEncoder();
 
+const REPO = "https://github.com/redtidev1918/deviantdrop";
+const HELP_TEXT = `发送 DeviantArt 单作品链接或 fav.me 短链，我会回复其中的图片、视频或 GIF。单条消息最多处理 ${MAX_LINKS} 个链接；图片/视频的 caption 里带链接也可以。\n\n/start 开始 · /help 用法 · /about 项目与源码`;
+const ABOUT_TEXT = `DeviantDrop：把 DeviantArt 作品「丢」进 Telegram 的 Bot。\n\n发送 DeviantArt 作品页或 fav.me 短链，即可收到图片、视频或 GIF；每条回复的媒体都会附带原作品页链接。\n\n开源项目（MIT）：${REPO}\n源码、部署与使用说明都在仓库里，欢迎 star、提 issue。`;
+const HINT_TEXT = `没有找到可下载的 DeviantArt 链接。\n\n发送 DeviantArt 作品页或 fav.me 短链，即可收到图片、视频或 GIF。\n/help 查看用法，/about 查看项目与源码。`;
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -65,18 +70,35 @@ async function handleMessage(message, env, origin) {
     return;
   }
 
+  // 转发自本 Bot 的消息（用户把上一条回复转发回来）会带着 caption 里的来源链接：
+  // 静默忽略，避免把刚下载过的作品再抓一遍。
+  if (isOwnForward(message, env)) return;
+
   const text = message.text ?? message.caption ?? "";
   const entities = message.text != null ? message.entities : message.caption_entities;
+  const command = text.match(/^\/(start|help|about)(?:@\w+)?(?:\s|$)/i)?.[1]?.toLowerCase();
   const links = extractDeviantArtUrls(text, entities);
-  if (!links.length && /^\/(?:start|help)(?:@\w+)?(?:\s|$)/i.test(text)) {
+  if (command && !links.length) {
     await telegram(env, "sendMessage", {
       chat_id: message.chat.id,
-      text: `发送 DeviantArt 单作品链接或 fav.me 短链，我会回复其中的图片、视频或 GIF。单条消息最多处理 ${MAX_LINKS} 个链接。`,
+      text: command === "about" ? ABOUT_TEXT : HELP_TEXT,
       reply_parameters: { message_id: message.message_id },
     });
     return;
   }
-  if (!links.length) throw new Error("没有找到 DeviantArt 作品链接");
+  if (!links.length) {
+    // 无 caption 的图片、贴纸等消息不打扰；只有明确的文字（私聊文本或 /命令）
+    // 才回一条用法提示，群聊里的闲聊保持安静。
+    if (!text.trim()) return;
+    if (message.chat.type === "private" || text.startsWith("/")) {
+      await telegram(env, "sendMessage", {
+        chat_id: message.chat.id,
+        text: HINT_TEXT,
+        reply_parameters: { message_id: message.message_id },
+      });
+    }
+    return;
+  }
 
   // ponytail: 单次最多 5 个链接；高吞吐场景应接 Queue，而不是拖长 webhook 请求。
   const selected = links.slice(0, MAX_LINKS);
@@ -99,6 +121,18 @@ async function handleMessage(message, env, origin) {
       reply_parameters: { message_id: message.message_id },
     });
   }
+}
+
+// BOT_TOKEN 形如 "123456:…"，冒号前的数字就是 Bot 自身的用户 id。
+function isOwnForward(message, env) {
+  const botId = Number(String(env.BOT_TOKEN ?? "").split(":")[0]);
+  if (!botId) return false;
+  const senderIds = [
+    message.forward_origin?.sender_user?.id,
+    message.forward_from?.id,
+    message.via_bot?.id,
+  ];
+  return senderIds.includes(botId);
 }
 
 async function createDeviantArtSession() {
