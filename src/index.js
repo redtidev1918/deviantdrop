@@ -16,7 +16,7 @@ const ABOUT_TEXT = `DeviantDrop：把 DeviantArt 作品「丢」进 Telegram 的
 const HINT_TEXT = `没有找到可下载的 DeviantArt 链接。\n\n发送 DeviantArt 作品页或 fav.me 短链，即可收到图片、视频或 GIF。\n/help 查看用法，/about 查看项目与源码。`;
 
 // 生产加固参数（README「限流与可靠性」有说明）。
-const SESSION_TTL_SECONDS = 600; // DA 匿名 session 跨消息复用时长
+const SESSION_TTL_SECONDS = 90; // DA session 跨消息复用时长（csrf 寿命短，别缓存太久）
 const UPDATE_DEDUPE_SECONDS = 90; // 同一 Telegram update 去重窗口（防超时重试重复发送）
 const GROUP_DEDUPE_SECONDS = 60; // 同一相册只处理第一条带链接的消息
 const RATE_WINDOW_MS = 60_000;
@@ -344,56 +344,73 @@ async function sendDeviantArt(url, message, env, origin, sessionMemo = {}, onSta
 }
 
 async function resolveWebMedia(url, env, origin, sessionMemo) {
-  if (!sessionMemo.session) sessionMemo.session = await getDeviantArtSession(env);
-  const session = sessionMemo.session;
-  const target = parseDeviantArtTarget(url);
-  const endpoint = new URL("/_puppy/dadeviation/init", DEVIANTART);
-  endpoint.searchParams.set("deviationid", target.id);
-  if (target.username) endpoint.searchParams.set("username", target.username);
-  // 该接口自 2026 年起把 type 列为必填（art/journal 等枚举值），缺失会返回 400。
-  endpoint.searchParams.set("type", "art");
-  endpoint.searchParams.set("include_session", "false");
-  endpoint.searchParams.set("csrf_token", session.csrf);
-  endpoint.searchParams.set("mature_content", "true");
-  const data = await fetchDeviantArtJson(endpoint, {
-    Accept: "application/json",
-    Referer: url.href,
-    ...DA_HEADERS,
-    ...(session.cookies ? { Cookie: session.cookies } : {}),
-  });
-  const deviation = data.deviation;
-  const allowMature = Boolean(env.DA_COOKIES);
-  const item = extractDeviantArtMedia(deviation, allowMature);
-  const extras = [];
-  // 多文件作品：其余画面在 init 响应的 deviation.extended.additionalMedia 里
-  // （daviewer/dakit 同源结论），每项嵌套 Wix 媒体描述符；解析失败仅发主图。
-  if (deviation?.isMultiMedia === true) {
+  // CSRF 会话有效期较短，缓存的 csrf 可能已过期导致 init 400：过期时清缓存换新会话重试一次。
+  for (let attempt = 0; ; attempt += 1) {
+    if (!sessionMemo.session) sessionMemo.session = await getDeviantArtSession(env);
+    const session = sessionMemo.session;
     try {
-      const raw = deviation?.extended?.additionalMedia;
-      if (Array.isArray(raw)) {
-        for (const entry of raw) {
-          if (extras.length >= 10) break;
-          const media = (entry && typeof entry === "object") ? entry.media : null;
-          const url = pickMultimediaUrl(media);
-          if (url) {
-            extras.push({
-              kind: extensionKind(url) || "photo",
-              url: await createProxyUrl(origin, url, env.WEBHOOK_SECRET),
-            });
+      const target = parseDeviantArtTarget(url);
+      const endpoint = new URL("/_puppy/dadeviation/init", DEVIANTART);
+      endpoint.searchParams.set("deviationid", target.id);
+      if (target.username) endpoint.searchParams.set("username", target.username);
+      // 该接口自 2026 年起把 type 列为必填（art/journal 等枚举值），缺失会返回 400。
+      endpoint.searchParams.set("type", "art");
+      endpoint.searchParams.set("include_session", "false");
+      endpoint.searchParams.set("csrf_token", session.csrf);
+      endpoint.searchParams.set("mature_content", "true");
+      const data = await fetchDeviantArtJson(endpoint, {
+        Accept: "application/json",
+        Referer: url.href,
+        ...DA_HEADERS,
+        ...(session.cookies ? { Cookie: session.cookies } : {}),
+      });
+      const deviation = data.deviation;
+      const allowMature = Boolean(env.DA_COOKIES);
+      const item = extractDeviantArtMedia(deviation, allowMature);
+      const extras = [];
+      // 多文件作品：其余画面在 init 响应的 deviation.extended.additionalMedia 里
+      // （daviewer/dakit 同源结论），每项嵌套 Wix 媒体描述符；解析失败仅发主图。
+      if (deviation?.isMultiMedia === true) {
+        try {
+          const raw = deviation?.extended?.additionalMedia;
+          if (Array.isArray(raw)) {
+            for (const entry of raw) {
+              if (extras.length >= 10) break;
+              const media = (entry && typeof entry === "object") ? entry.media : null;
+              const extraUrl = pickMultimediaUrl(media);
+              if (extraUrl) {
+                extras.push({
+                  kind: extensionKind(extraUrl) || "photo",
+                  url: await createProxyUrl(origin, extraUrl, env.WEBHOOK_SECRET),
+                });
+              }
+            }
           }
+        } catch (error) {
+          console.error("多图解析失败，仅发主图:", error instanceof Error ? error.message : String(error));
         }
       }
+      return {
+        kind: item.kind,
+        url: await createProxyUrl(origin, item.url, env.WEBHOOK_SECRET),
+        title: item.title,
+        extras,
+      };
     } catch (error) {
-      console.error("多图解析失败，仅发主图:", error instanceof Error ? error.message : String(error));
+      const text = error instanceof Error ? error.message : String(error);
+      if (attempt === 0 && /HTTP 400/.test(text)) {
+        // csrf 过期/被抢占：清掉缓存会话，下一次循环用新会话重试
+        const key = env.DA_COOKIES ? "session:auth" : "session";
+        await cacheSet("da", key, null, 1);
+        sessionMemo.session = null;
+        console.error("init 400，刷新会话重试:", text);
+        continue;
+      }
+      throw error;
     }
   }
-  return {
-    kind: item.kind,
-    url: await createProxyUrl(origin, item.url, env.WEBHOOK_SECRET),
-    title: item.title,
-    extras,
-  };
 }
+
 
 // 附加媒体的 URL 选择：与主媒体一致，优先 baseUri 原始文件，其次模板。
 function pickMultimediaUrl(media) {
