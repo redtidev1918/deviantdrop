@@ -547,3 +547,44 @@ test("reuses the Telegram file_id for repeated links", async (t) => {
   assert.equal(sends.filter((s) => s.photo === "PHOTO_1").length, 1); // 第二次用 file_id 重发
   assert.equal(sends.filter((s) => typeof s.photo === "string" && s.photo.startsWith("https://")).length, 1); // 第一次用 URL 发送
 });
+
+test("falls back to document for oversized photos and reuses its file_id", async (t) => {
+  const originalFetch = globalThis.fetch;
+  let initCalls = 0;
+  const calls = [];
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url === "https://www.deviantart.com/") {
+      return new Response("window.__CSRF_TOKEN__ = 'csrf'");
+    }
+    if (url.includes("/_puppy/dadeviation/init")) {
+      initCalls += 1;
+      return Response.json({ deviation: { title: "大图", media: { baseUri: "https://images.wixmp.com/big.jpg", token: "t" } } });
+    }
+    if (url.includes("api.telegram.org")) {
+      const method = url.split("/").pop();
+      const body = JSON.parse(init.body);
+      calls.push({ method, body });
+      if (method === "sendPhoto") {
+        return Response.json({ ok: false, description: "Bad Request: file is too big", error_code: 400 });
+      }
+      return Response.json({ ok: true, result: { message_id: 5, document: { file_id: "DOC_1" } } });
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  t.after(installFakeCache());
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  const env = { BOT_TOKEN: "111:secret", WEBHOOK_SECRET: "secret" };
+  const link = "https://www.deviantart.com/artist/art/huge-888888888";
+  const msg = (id) => ({ from: { id: 42 }, chat: { id: 810, type: "private" }, message_id: id, text: link });
+
+  await postMessage(env, 601, msg(60));
+  await postMessage(env, 602, msg(61));
+
+  assert.equal(initCalls, 1); // 第二次走 file_id
+  const documents = calls.filter((c) => c.method === "sendDocument");
+  assert.equal(documents.length, 2); // 第一次文档URL + 第二次文档file_id
+  assert.equal(documents[1].body.document, "DOC_1");
+  assert.equal(calls.filter((c) => c.method === "sendPhoto").length, 1); // 第一次尝试照片被拒
+});

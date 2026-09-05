@@ -502,32 +502,38 @@ async function pickOfficialMediaUrl(env, deviation, uuid) {
 }
 
 async function sendOne(kind, mediaUrl, caption, message, env, upload = false) {
-  const fields = {
-    photo: ["sendPhoto", "photo"],
-    video: ["sendVideo", "video"],
-    animation: ["sendAnimation", "animation"],
-  }[kind];
+  const fields = MEDIA_FIELDS[kind];
   if (!fields) throw new Error("不支持的媒体类型");
   const text = String(caption).slice(0, 1024);
   if (upload) {
     // 轮询模式：Telegram 服务器拉不动 wixmp（需 Referer/UA），由 Bot 先下载再上传。
-    return uploadMedia(env, fields[0], fields[1], mediaUrl, text, message);
+    return uploadMedia(env, kind, mediaUrl, text, message);
   }
-  return telegram(env, fields[0], {
-    chat_id: message.chat.id,
-    [fields[1]]: mediaUrl,
-    caption: text,
-    reply_parameters: { message_id: message.message_id },
-  });
+  try {
+    return await telegram(env, fields[0], {
+      chat_id: message.chat.id,
+      [fields[1]]: mediaUrl,
+      caption: text,
+      reply_parameters: { message_id: message.message_id },
+    });
+  } catch (error) {
+    // 照片 URL 超过 10 MiB：改以文档方式让 Telegram 下载（文档上限 50 MiB）。
+    if (kind === "photo" && isTooBigError(error)) {
+      const [docMethod, docField] = MEDIA_FIELDS.document;
+      return telegram(env, docMethod, {
+        chat_id: message.chat.id,
+        [docField]: mediaUrl,
+        caption: text,
+        reply_parameters: { message_id: message.message_id },
+      });
+    }
+    throw error;
+  }
 }
 
 // 用已缓存 file_id 直接重发（不再下载，Telegram 服务端去重）。
 async function sendFileById(kind, fileId, caption, message, env) {
-  const fields = {
-    photo: ["sendPhoto", "photo"],
-    video: ["sendVideo", "video"],
-    animation: ["sendAnimation", "animation"],
-  }[kind];
+  const fields = MEDIA_FIELDS[kind];
   if (!fields) throw new Error("不支持的媒体类型");
   await telegram(env, fields[0], {
     chat_id: message.chat.id,
@@ -538,22 +544,29 @@ async function sendFileById(kind, fileId, caption, message, env) {
 }
 
 // 记住作品 → file_id 的映射，供后续复用（file_id 同 Bot 长期有效）。
-async function rememberFileId(id, kind, title, sent, env) {
-  const fileId = fileIdOf(sent, kind);
-  if (!fileId) return;
-  await cacheSet("fid", `d:${id}`, { file_id: fileId, kind, title }, 30 * 24 * 3600);
+// 记录实际送达类型（照片过大被 Telegram 转成文档时也是 document）。
+async function rememberFileId(id, kindHint, title, sent, env) {
+  const detected = detectFile(sent) || { kind: kindHint, file_id: null };
+  if (!detected.file_id) return;
+  await cacheSet("fid", `d:${id}`, { file_id: detected.file_id, kind: detected.kind, title }, 30 * 24 * 3600);
 }
 
-function fileIdOf(result, kind) {
-  const field = { photo: "photo", video: "video", animation: "animation" }[kind];
-  const value = result?.[field];
-  if (!value) return null;
-  if (kind === "photo") return Array.isArray(value) ? value.at(-1)?.file_id : value.file_id;
-  return value.file_id || null;
+// 从 sendXxx 返回的 Message 里探测实际送达类型与 file_id。
+function detectFile(result) {
+  if (!result) return null;
+  if (result.document?.file_id) return { kind: "document", file_id: result.document.file_id };
+  if (result.video?.file_id) return { kind: "video", file_id: result.video.file_id };
+  if (result.animation?.file_id) return { kind: "animation", file_id: result.animation.file_id };
+  const photos = result.photo;
+  if (Array.isArray(photos) && photos.length) {
+    return { kind: "photo", file_id: photos.at(-1)?.file_id || photos[0]?.file_id };
+  }
+  return null;
 }
 
-// 下载媒体并作为 multipart 文件上传给 Telegram（带 DA 所需 Referer/UA，规避 Telegram 拉不动）。
-async function uploadMedia(env, method, field, mediaUrl, caption, message) {
+// 下载媒体并作为 multipart 上传给 Telegram（带 DA 所需 Referer/UA，规避 Telegram 拉不动）。
+// 照片字节超过 Telegram 上限时提前改发文档（TelePost 同款阈值策略），失败也会兜底再发一次文档。
+async function uploadMedia(env, kind, mediaUrl, caption, message) {
   const response = await guardedFetch(mediaUrl, {
     headers: { ...DA_HEADERS, Referer: DEVIANTART },
     signal: AbortSignal.timeout(120_000),
@@ -563,13 +576,26 @@ async function uploadMedia(env, method, field, mediaUrl, caption, message) {
     throw new Error(`媒体下载失败（HTTP ${response.status}）`);
   }
   const bytes = new Uint8Array(await response.arrayBuffer());
-  const extension = guessExtension(mediaUrl, field);
-  const form = new FormData();
-  form.set("chat_id", String(message.chat.id));
-  form.set("caption", caption);
-  form.set("reply_parameters", JSON.stringify({ message_id: message.message_id }));
-  form.set(field, new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `${field}.${extension}`);
-  return telegramForm(env, method, form);
+  const extension = guessExtension(mediaUrl, kind === "photo" ? "document" : kind);
+  const makeForm = (field) => {
+    const form = new FormData();
+    form.set("chat_id", String(message.chat.id));
+    form.set("caption", caption);
+    form.set("reply_parameters", JSON.stringify({ message_id: message.message_id }));
+    form.set(field, new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `${field}.${extension}`);
+    return form;
+  };
+  const [method, field] = MEDIA_FIELDS[kind];
+  try {
+    // 照片超过阈值：Telegram 不收 10MiB 以上的照片，直接按文档发
+    const asDocument = kind === "photo" && bytes.length > PHOTO_MAX_BYTES;
+    return await telegramForm(env, asDocument ? MEDIA_FIELDS.document[0] : method, makeForm(asDocument ? "document" : field));
+  } catch (error) {
+    if (kind === "photo" && isTooBigError(error)) {
+      return telegramForm(env, MEDIA_FIELDS.document[0], makeForm("document"));
+    }
+    throw error;
+  }
 }
 
 async function telegramForm(env, method, form) {
@@ -592,6 +618,21 @@ async function telegramForm(env, method, form) {
   }
   throw new Error("Telegram 暂时限流，请稍后重试");
 }
+
+// Telegram 照片上限 10 MiB；文档可到 50 MiB。照片超过该阈值提前改发文档
+// （与 TelePost 的 reclassify_oversized_photos 同一阈值语义，取 9.5 MiB 留余量）。
+const PHOTO_MAX_BYTES = 9.5 * 1024 * 1024;
+
+function isTooBigError(error) {
+  const text = error instanceof Error ? error.message : String(error);
+  return /file is too big|image is too big|too large|PHOTO_INVALID_DIMENSIONS/i.test(text);
+}
+const MEDIA_FIELDS = {
+  photo: ["sendPhoto", "photo"],
+  video: ["sendVideo", "video"],
+  animation: ["sendAnimation", "animation"],
+  document: ["sendDocument", "document"],
+};
 
 const MIME_BY_EXTENSION = {
   jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp",
