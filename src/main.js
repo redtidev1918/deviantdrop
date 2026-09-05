@@ -144,7 +144,8 @@ async function pollUpdates(env) {
       const query = new URLSearchParams({
         timeout: "25",
         offset: String(offset),
-        allowed_updates: '["message"]',
+        // 诊断用：channel_post 也拉取并打日志，便于区分「群/超群/频道」的投递
+        allowed_updates: '["message","channel_post"]',
       });
       const response = await fetch(
         `https://api.telegram.org/bot${env.BOT_TOKEN}/getUpdates?${query}`,

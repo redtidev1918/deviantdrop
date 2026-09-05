@@ -940,7 +940,9 @@ async function telegramForm(env, method, form) {
       continue;
     }
     if (!response.ok || !result?.ok) {
-      throw new Error(result?.description || `Telegram 返回 HTTP ${response.status}`);
+      const description = result?.description || `Telegram 返回 HTTP ${response.status}`;
+      console.error(`[tg] ${method} 失败: ${description}`);
+      throw new Error(description);
     }
     return result.result;
   }
@@ -1016,7 +1018,9 @@ async function telegram(env, method, body) {
       continue;
     }
     if (!response.ok || !result?.ok) {
-      throw new Error(result?.description || `Telegram 返回 HTTP ${response.status}`);
+      const description = result?.description || `Telegram 返回 HTTP ${response.status}`;
+      console.error(`[tg] ${method} 失败: ${description}`);
+      throw new Error(description);
     }
     return result.result;
   }
