@@ -374,8 +374,25 @@ async function resolveWebMedia(url, env, origin, sessionMemo) {
         ...(session.cookies ? { Cookie: session.cookies } : {}),
       });
       const deviation = data.deviation;
-      const allowMature = Boolean(env.DA_COOKIES);
+      // 有用户 OAuth（refresh token）或登录 Cookie 都视为已登录，放行成熟内容
+      const allowMature = Boolean(env.DA_COOKIES || env.DA_REFRESH_TOKEN);
       const item = extractDeviantArtMedia(deviation, allowMature);
+      // 成熟作品：用用户 OAuth 走官方接口取“未打码原图”，替代打码的网页预览
+      if (deviation?.isMature === true && env.DA_REFRESH_TOKEN) {
+        try {
+          const uuid = deviation?.extended?.deviationUuid;
+          if (uuid) {
+            const official = await officialApiGet(env, `deviation/${uuid}`);
+            const original = await pickOfficialMediaUrl(env, official, uuid);
+            if (original) {
+              item.url = original;
+              item.kind = extensionKind(original) || item.kind;
+            }
+          }
+        } catch (error) {
+          console.error("OAuth 取原图失败，回退网页预览:", error instanceof Error ? error.message : String(error));
+        }
+      }
       const display = displayMediaUrl(deviation.media || {});
       const extras = [];
       // 多文件作品：其余画面在 init 响应的 deviation.extended.additionalMedia 里

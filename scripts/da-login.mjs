@@ -11,6 +11,7 @@ import { createServer } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { writeFileSync } from "node:fs";
 
 const execFileAsync = promisify(execFile);
 
@@ -18,7 +19,8 @@ const AUTHORIZE = "https://www.deviantart.com/oauth2/authorize";
 const TOKEN = "https://www.deviantart.com/oauth2/token";
 const SCOPES = "basic browse";
 
-const [clientId, clientSecret = "", portArg] = process.argv.slice(2);
+const [clientId, clientSecret = "", portArg, serverArg] = process.argv.slice(2);
+const server = process.env.SERVER || serverArg || "root@114.55.249.249";
 const port = Number(portArg || 8787);
 if (!clientId) {
   console.error("用法: node scripts/da-login.mjs <client_id> [client_secret] [port]");
@@ -99,6 +101,19 @@ if (!data?.refresh_token) {
   process.exit(1);
 }
 
-console.log("\n登录成功！把下面的 refresh_token 填到服务器 .env 的 DA_REFRESH_TOKEN=：\n");
-console.log(data.refresh_token);
+console.log("\n登录成功！refresh_token 已取得，正在写入 VPS " + server + " …\n");
+const tmp = "/tmp/dd_rt.txt";
+writeFileSync(tmp, data.refresh_token);
+try {
+  await execFileAsync("scp", ["-q", tmp, server + ":/tmp/dd_rt.txt"], { timeout: 120000 });
+  const remote = "RT=$(cat /tmp/dd_rt.txt) && cd /opt/deviantdrop && " +
+    "(grep -q '^DA_REFRESH_TOKEN=' .env && sed -i 's|^DA_REFRESH_TOKEN=.*|DA_REFRESH_TOKEN=$RT|' .env || echo \"DA_REFRESH_TOKEN=$RT\" >> .env) && " +
+    "chmod 600 .env && docker compose up -d >/dev/null 2>&1 && echo DEPLOYED";
+  await execFileAsync("ssh", [server, remote], { timeout: 300000, maxBuffer: 1024 * 1024 });
+  console.log("✅ 已写入 /opt/deviantdrop/.env 并重启容器。");
+} catch (error) {
+  console.error("自动部署失败，请手动把下面 refresh_token 写进 .env 的 DA_REFRESH_TOKEN=：");
+  console.log(data.refresh_token);
+  console.error(error && error.stderr ? error.stderr : error.message);
+}
 console.log("\n（access token 有效期 " + (data.expires_in || "?") + " 秒，Bot 会自动续期）\n");
