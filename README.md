@@ -14,7 +14,11 @@ Bot 会同时检查普通消息和媒体 caption，并识别：
 - 同一消息中的多个链接；保持出现顺序、删除完全重复项，最多处理 5 个。
 - 当前作品页（`作者.deviantart.com/art|journal/标题-数字id`）。
 
-解析链路：官方 OAuth API 只认 UUID，而作品页 URL 携带的是数字 id；数字→UUID 的公开映射只存在于作品页内嵌 JSON，DA 的网页对云出口封锁，因此该映射取自 [archive.org](https://web.archive.org) 对作品页的存档快照。**没有存档快照的新作品、以及无法定位作品页的旧式链接（`fav.me`、`/view/{id}`、`view.php?id=`）会得到明确的中文提示**——把短链在浏览器打开后复制完整作品页网址即可。私密/付费/成熟且需登录的作品受官方 API 限制，同样会提示。
+解析是双通道的：
+1. **网页接口优先**——出口能被 DeviantArt 放行时（住宅网络，或国内服务器经机场代理），直接走网页作品接口，**新作品、视频/GIF 都能取到**，无需任何存档；
+2. **官方接口兜底**——网页不可达但配置了官方 API 凭据时，走「官方 OAuth API + [archive.org](https://web.archive.org) 存档映射 UUID」（新作品若无存档快照会收到明确中文提示）。
+
+无法定位作品页的旧式链接（`fav.me`、`/view/{id}`、`view.php?id=`）两类通道都不支持，会提示改用完整作品页网址。私密/付费/需登录作品同样会提示。
 
 不处理画廊、收藏夹、标签页、搜索结果、非 DeviantArt 直链。每个链接独立处理：一个失败不会阻止后续链接。
 
@@ -24,24 +28,24 @@ Bot 会同时检查普通消息和媒体 caption，并识别：
 - `/about`：项目介绍与源码仓库（github.com/redtidev1918/deviantdrop，聊天里直接可点）。
 - 图片/视频的 caption 里带 DeviantArt 链接同样会被解析下载；不带 caption 的图片、贴纸等消息会被静默忽略。
 - 每条媒体回复的 caption 都会附带原作品页链接（Telegram 自动使其可点击），方便回原页查看或确认作者。
+- 下载/解析期间会先回一条自动删除的「处理中」提示（多链接时带进度 `⏳ 第 x/N 个`），完成后提示自动消失。
 - 转发自 Bot 自己的消息会被忽略，不会把 caption 里的来源链接再重复下载一遍。
 
 ## 工作方式
 
-1. 校验 Telegram webhook secret 和可选用户白名单。
-2. 从消息正文/caption 及 Telegram entities 中收集、规范化并去重链接。
-3. 用官方 OAuth API 的 `client_credentials` 换 access token（跨消息缓存约 1 小时）。
-4. 数字作品 id → 经 archive.org 存档快照解析出 UUID（结果长期缓存）；找不到快照时给出中文提示。
-5. 按 UUID 调官方 API 取作品：优先原图/原文件下载端点，回落 `content`/`preview` 媒体地址。
-6. 生成 15 分钟有效的 HMAC 签名媒体 URL。Telegram 经 Worker 流式读取 DeviantArt CDN；Worker 不缓存完整文件，并支持视频 Range 请求。
-
-（未配置官方凭据时自动退回网页 `_puppy/dadeviation/init` 路径——该路径依赖未被 DeviantArt 封禁的出口 IP，仅适合本机/自建服务器部署。）
+1. 接入消息：webhook 校验 secret / 长轮询拉取（`MODE=poll`，免公网入口），并检查可选用户白名单。
+2. 从消息正文/caption 及 Telegram entities 中收集、规范化并去重链接（单条最多 5 个）。
+3. 逐链接解析（双通道）：
+   - **网页通道**：匿名会话（CSRF/cookie，消息内复用 + 跨消息缓存）请求网页作品接口，返回最高清晰度 MP4/图片/GIF（含视频）；
+   - **官方通道**（网页不可达时的兜底）：`client_credentials` 换 token → 数字 id 经 archive.org 存档映射为 UUID（长期缓存）→ 调官方 API 取媒体。
+4. 先回一条自动删除的「处理中」提示并随进度更新，然后发送媒体（媒体 caption 带原作品页链接）。
+5. 媒体送达：webhook 模式经 15 分钟 HMAC 签名代理流式转发（支持 Range）；轮询模式直接把带 token 的 CDN 地址交给 Telegram 下载。
 
 ## 限流与可靠性
 
 不存在合法的“绕过 DeviantArt 限额”。官方 API 按应用配额与自适应限流；Bot 对网络错误、HTTP 429、500 和 503 会退避重试，token 与 UUID 映射在消息之间缓存复用，显著降低请求总量。持续高并发时应接入 Cloudflare Queue，不能通过轮换 IP 或并发轰炸规避限制。
 
-DA 网页面（含 `_puppy` 内部接口）对其认为是数据中心的出口 IP 段返回 403，Cloudflare Workers 与多数云主机都被封锁；官方 OAuth API（`/oauth2/token`、`/api/v1/oauth2/*`）与媒体 CDN（wixmp）对云出口放行，这就是本 Bot 必须配置官方凭据的原因。
+DA 网页面（含网页作品接口）对其认为是数据中心的出口 IP 段返回 403，Cloudflare Workers 与多数云主机都被封锁；官方 OAuth API 与媒体 CDN（wixmp）相对放行。配置官方 API 凭据后，网页通道被封时 Bot 会自动改用官方通道兜底。
 
 Telegram 单会话也可能触发 429；Bot 会读取 `retry_after` 并重试一次。以下情况会直接回复用户可理解的错误：
 
