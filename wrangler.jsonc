@@ -1,0 +1,9 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "deviantdrop",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-03",
+  "secrets": {
+    "required": ["BOT_TOKEN", "WEBHOOK_SECRET"]
+  }
+}

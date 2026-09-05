@@ -1,0 +1,4 @@
+BOT_TOKEN=123456789:replace_me
+WEBHOOK_SECRET=replace_with_a_random_string
+# 可选，逗号分隔；留空则允许所有 Telegram 用户。
+ALLOWED_USER_IDS=123456789

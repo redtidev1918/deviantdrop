@@ -1,0 +1,32 @@
+{
+  "name": "deviantdrop",
+  "version": "1.0.0",
+  "description": "Telegram bot on Cloudflare Workers: paste a DeviantArt link (artwork page or fav.me) and get the image, video or GIF back.",
+  "type": "module",
+  "license": "MIT",
+  "author": "redtidev1918",
+  "homepage": "https://github.com/redtidev1918/deviantdrop",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/redtidev1918/deviantdrop.git"
+  },
+  "bugs": {
+    "url": "https://github.com/redtidev1918/deviantdrop/issues"
+  },
+  "keywords": [
+    "telegram",
+    "telegram-bot",
+    "cloudflare-workers",
+    "deviantart",
+    "download"
+  ],
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test",
+    "check": "npm test && wrangler deploy --dry-run --outdir dist"
+  },
+  "devDependencies": {
+    "wrangler": "^4.129.0"
+  }
+}
