@@ -152,12 +152,34 @@ async function handleMessage(message, env, origin) {
 
   // “处理中”临时状态提示：带进度，全部完成后自动删除（尽力而为，失败不影响主体）。
   const total = pending.length;
+  // “处理中”临时状态提示：阶段化（获取信息 → 下载进度% → 发送中），完成后自动删除。
   let statusId = null;
+  let statusLastEdit = 0;
+  const statusShow = async (text) => {
+    if (!statusId) return;
+    const now = Date.now();
+    if (now - statusLastEdit < 900) return; // Telegram 编辑有频率限制，节流
+    statusLastEdit = now;
+    try {
+      await telegram(env, "editMessageText", { chat_id: message.chat.id, message_id: statusId, text });
+    } catch {
+      // 状态消息可能已被删除或过期，忽略
+    }
+  };
+  const statusDelete = async () => {
+    if (!statusId) return;
+    try {
+      await telegram(env, "deleteMessage", { chat_id: message.chat.id, message_id: statusId });
+    } catch {
+      // 忽略
+    }
+    statusId = null;
+  };
   if (total > 0) {
     try {
       const sent = await telegram(env, "sendMessage", {
         chat_id: message.chat.id,
-        text: `⏳ 正在获取第 1/${total} 个作品的媒体…`,
+        text: "⏳ 正在获取作品信息…",
         reply_parameters: { message_id: message.message_id },
       });
       statusId = sent?.message_id ?? null;
@@ -165,29 +187,13 @@ async function handleMessage(message, env, origin) {
       statusId = null;
     }
   }
-  const updateStatus = async (nextIndex) => {
-    if (!statusId) return;
-    try {
-      if (nextIndex >= total) {
-        await telegram(env, "deleteMessage", { chat_id: message.chat.id, message_id: statusId });
-        statusId = null; // 已删除，finally 不再重复删
-      } else {
-        await telegram(env, "editMessageText", {
-          chat_id: message.chat.id,
-          message_id: statusId,
-          text: `⏳ 正在获取第 ${nextIndex + 1}/${total} 个作品的媒体…`,
-        });
-      }
-    } catch {
-      // 状态消息可能已被删除或过期，忽略
-    }
-  };
   try {
-    // 一条消息内的多个链接共享同一个网页 session（备忘录；跨消息仍有 Cache 层复用）。
     const sessionMemo = {};
     for (let index = 0; index < pending.length; index += 1) {
+      const label = pending.length > 1 ? `第 ${index + 1}/${pending.length} 个作品：` : "";
+      const onStatus = (text) => statusShow(`⏳ ${label}${text}`);
       try {
-        await sendDeviantArt(new URL(pending[index]), message, env, origin, sessionMemo);
+        await sendDeviantArt(new URL(pending[index]), message, env, origin, sessionMemo, onStatus);
       } catch (error) {
         await telegram(env, "sendMessage", {
           chat_id: message.chat.id,
@@ -195,7 +201,6 @@ async function handleMessage(message, env, origin) {
           reply_parameters: { message_id: message.message_id },
         });
       }
-      await updateStatus(index + 1);
     }
     if (budget < selected.length) {
       await telegram(env, "sendMessage", {
@@ -212,7 +217,7 @@ async function handleMessage(message, env, origin) {
       });
     }
   } finally {
-    await updateStatus(total); // 完成：删除状态提示
+    await statusDelete(); // 全部完成：删除状态提示
   }
 }
 
@@ -294,7 +299,7 @@ async function createDeviantArtSession(env) {
 // 解析并发送单个作品。双通道级联：
 //   1) 网页 _puppy 接口（出口可达时能力最全：新作品/视频/GIF/无需凭据，session 已缓存复用）；
 //   2) 网页不可达时，若配置了官方 API 凭据则走「官方 API + archive.org 存档映射」兜底。
-async function sendDeviantArt(url, message, env, origin, sessionMemo = {}) {
+async function sendDeviantArt(url, message, env, origin, sessionMemo = {}, onStatus = null) {
   const target = parseDeviantArtTarget(url);
   // 媒体级去重：同一作品首次发过后缓存 Telegram file_id，再发直接用 file_id（零下载）。
   const cached = await cacheGet("fid", `d:${target.id}`);
@@ -304,7 +309,7 @@ async function sendDeviantArt(url, message, env, origin, sessionMemo = {}) {
   }
   try {
     const media = await resolveWebMedia(url, env, origin, sessionMemo);
-    const sent = await sendOne(media.kind, media.url, `${media.title}\n${url.href}`, message, env, !origin);
+    const sent = await sendOne(media.kind, media.url, `${media.title}\n${url.href}`, message, env, !origin, onStatus);
     await rememberFileId(target.id, media.kind, media.title, sent, env);
     return;
   } catch (error) {
@@ -315,7 +320,7 @@ async function sendDeviantArt(url, message, env, origin, sessionMemo = {}) {
     console.error("网页解析失败(网络)，转官方 API:", text);
   }
   const official = await resolveOfficialMedia(url, env, origin);
-  const sent = await sendOne(official.kind, official.url, `${official.title}\n${url.href}`, message, env, !origin);
+  const sent = await sendOne(official.kind, official.url, `${official.title}\n${url.href}`, message, env, !origin, onStatus);
   await rememberFileId(target.id, official.kind, official.title, sent, env);
 }
 
@@ -501,13 +506,13 @@ async function pickOfficialMediaUrl(env, deviation, uuid) {
   return preview || null;
 }
 
-async function sendOne(kind, mediaUrl, caption, message, env, upload = false) {
+async function sendOne(kind, mediaUrl, caption, message, env, upload = false, onStatus = null) {
   const fields = MEDIA_FIELDS[kind];
   if (!fields) throw new Error("不支持的媒体类型");
   const text = String(caption).slice(0, 1024);
   if (upload) {
     // 轮询模式：Telegram 服务器拉不动 wixmp（需 Referer/UA），由 Bot 先下载再上传。
-    return uploadMedia(env, kind, mediaUrl, text, message);
+    return uploadMedia(env, kind, mediaUrl, text, message, onStatus);
   }
   try {
     return await telegram(env, fields[0], {
@@ -566,16 +571,36 @@ function detectFile(result) {
 
 // 下载媒体并作为 multipart 上传给 Telegram（带 DA 所需 Referer/UA，规避 Telegram 拉不动）。
 // 照片字节超过 Telegram 上限时提前改发文档（TelePost 同款阈值策略），失败也会兜底再发一次文档。
-async function uploadMedia(env, kind, mediaUrl, caption, message) {
+async function uploadMedia(env, kind, mediaUrl, caption, message, onStatus = null) {
   const response = await guardedFetch(mediaUrl, {
     headers: { ...DA_HEADERS, Referer: DEVIANTART },
-    signal: AbortSignal.timeout(120_000),
+    signal: AbortSignal.timeout(180_000),
   }, "媒体下载");
   if (!response.ok) {
     response.body?.cancel();
     throw new Error(`媒体下载失败（HTTP ${response.status}）`);
   }
-  const bytes = new Uint8Array(await response.arrayBuffer());
+  // 流式读取以报告下载进度（Telegram Bot API 没有上传进度事件，进度只能反映“下载”阶段）
+  const totalBytes = Number(response.headers.get("Content-Length")) || 0;
+  const chunks = [];
+  let received = 0;
+  let lastPct = -1;
+  const reader = response.body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.byteLength;
+    if (onStatus && totalBytes > 0) {
+      const pct = Math.floor((received / totalBytes) * 100);
+      if (pct % 5 === 0 && pct > lastPct) {
+        lastPct = pct;
+        onStatus(`正在下载 ${pct}%`);
+      }
+    }
+  }
+  const bytes = concatBytes(chunks);
+  if (onStatus) onStatus("正在发送…");
   const extension = guessExtension(mediaUrl, kind === "photo" ? "document" : kind);
   const makeForm = (field) => {
     const form = new FormData();
@@ -600,11 +625,17 @@ async function uploadMedia(env, kind, mediaUrl, caption, message) {
 
 async function telegramForm(env, method, form) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const response = await fetch(`${TELEGRAM_API}/bot${env.BOT_TOKEN}/${method}`, {
-      method: "POST",
-      body: form,
-      signal: AbortSignal.timeout(120_000),
-    });
+    let response;
+    try {
+      response = await fetch(`${TELEGRAM_API}/bot${env.BOT_TOKEN}/${method}`, {
+        method: "POST",
+        body: form,
+        signal: AbortSignal.timeout(180_000),
+      });
+    } catch (error) {
+      if (attempt === 0) { await sleep(1000); continue; }
+      throw new Error("Telegram 连接失败或超时，请稍后再试");
+    }
     const result = await response.json().catch(() => null);
     const retryAfter = Number(result?.parameters?.retry_after);
     if (response.status === 429 && retryAfter > 0 && attempt === 0) {
@@ -634,6 +665,18 @@ const MEDIA_FIELDS = {
   document: ["sendDocument", "document"],
 };
 
+function concatBytes(chunks) {
+  let size = 0;
+  for (const chunk of chunks) size += chunk.byteLength;
+  const out = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
 const MIME_BY_EXTENSION = {
   jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp",
   gif: "image/gif", mp4: "video/mp4", m4v: "video/mp4",
@@ -648,12 +691,18 @@ function guessExtension(mediaUrl, kind) {
 
 async function telegram(env, method, body) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const response = await fetch(`${TELEGRAM_API}/bot${env.BOT_TOKEN}/${method}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(30_000),
-    });
+    let response;
+    try {
+      response = await fetch(`${TELEGRAM_API}/bot${env.BOT_TOKEN}/${method}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(30_000),
+      });
+    } catch (error) {
+      if (attempt === 0) { await sleep(1000); continue; }
+      throw new Error("Telegram 连接失败或超时，请稍后再试");
+    }
     const result = await response.json().catch(() => null);
     const retryAfter = Number(result?.parameters?.retry_after);
     if (response.status === 429 && retryAfter > 0 && attempt === 0) {
