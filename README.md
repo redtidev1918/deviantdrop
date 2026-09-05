@@ -32,7 +32,7 @@ Bot 会同时检查普通消息和媒体 caption，并识别：
 
 ## 限流与可靠性
 
-不存在合法的“绕过 DeviantArt 限额”。DeviantArt 使用自适应限流；Bot 对网络错误、HTTP 429、500 和 503 最多重试两次并指数退避，同时复用单条消息的 session，避免无意义请求。持续高并发时应接入 Cloudflare Queue，并按 DeviantArt 官方 API/OAuth 规则访问，不能通过轮换 IP 或并发轰炸规避限制。
+不存在合法的“绕过 DeviantArt 限额”。DeviantArt 使用自适应限流；Bot 对网络错误、HTTP 429、500 和 503 最多重试两次并指数退避，并把匿名 session（CSRF/cookie）在消息之间缓存复用 10 分钟——无论来自哪个聊天，同一时间窗内只向 DeviantArt 首页请求一次，显著降低总量。持续高并发时应接入 Cloudflare Queue，并按 DeviantArt 官方 API/OAuth 规则访问，不能通过轮换 IP 或并发轰炸规避限制。
 
 当前版本为免配置 DeviantArt 凭据，沿用参考项目的网页公开 `_puppy/dadeviation/init` 接口；它不是稳定的官方 API 合约，DeviantArt 改版时可能失效。要求长期生产稳定性或访问用户授权内容时，应注册 DeviantArt 应用并改用 OAuth API，仍须遵守其自适应限流。
 
@@ -44,6 +44,13 @@ Telegram 单会话也可能触发 429；Bot 会读取 `retry_after` 并重试一
 - 媒体超过 Telegram 限制，或 Telegram 无法读取媒体格式。
 
 当前 Telegram Bot API 的图片上限为 10 MB，视频/GIF 为 50 MB。Webhook 采用同步处理以保持最小部署；若实际出现长视频超时、重复投递或并发积压，再增加 Queue 与持久化 `update_id` 去重。
+
+Bot 内置了防滥用/防重复（常量在 `src/index.js` 顶部，可直接调）：
+
+- 每聊天限流：每个聊天每分钟最多处理 15 个作品链接，超出会收到中文提示并跳过。
+- Telegram 超时重试同一个 update 不会重复发送（90 秒去重窗口）；中途被掐断的重试仍会重新处理，宁重复不丢消息。
+- 相册消息（media_group）里多张照片都带链接时，只处理第一条。
+- 去重与限流基于 Cloudflare Cache API 的默认命名空间：无需额外绑定，代价是读改写非原子（尽力而为），且纯 Node 测试环境自动停用这些保护。
 
 ## 部署
 

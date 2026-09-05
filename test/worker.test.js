@@ -292,3 +292,127 @@ test("answers /about, parses media captions, and ignores link-less or own-forwar
   });
   assert.equal(groupChat.replies.length, 0);
 });
+
+// —— 加固测试：注入假的 Cloudflare Cache API（无 caches 时生产逻辑自动降级为关闭） ——
+
+function installFakeCache() {
+  const entries = new Map();
+  const previous = globalThis.caches;
+  globalThis.caches = {
+    default: {
+      async match(input) {
+        const hit = entries.get(new URL(String(input)).href);
+        if (!hit || hit.expires <= Date.now()) return undefined;
+        return new Response(hit.body);
+      },
+      async put(input, response) {
+        const maxAge = Number(response.headers.get("Cache-Control")?.match(/max-age=(\d+)/)?.[1] ?? 0);
+        entries.set(new URL(String(input)).href, {
+          body: await response.text(),
+          expires: Date.now() + maxAge * 1000,
+        });
+      },
+    },
+  };
+  return () => {
+    if (previous === undefined) delete globalThis.caches;
+    else globalThis.caches = previous;
+  };
+}
+
+function installFetchHarness(calls) {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url === "https://www.deviantart.com/") {
+      calls.home += 1;
+      return new Response("window.__CSRF_TOKEN__ = 'csrf'");
+    }
+    if (url.includes("/_puppy/dadeviation/init")) {
+      calls.init += 1;
+      return Response.json({ deviation: { title: "作品", media: { baseUri: "https://images.wixmp.com/work.jpg" } } });
+    }
+    if (url.includes("api.telegram.org")) {
+      calls.telegram.push({ url, body: JSON.parse(init.body) });
+      return Response.json({ ok: true, result: {} });
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  return () => { globalThis.fetch = originalFetch; };
+}
+
+function webhookEnv() {
+  return { BOT_TOKEN: "111:secret", WEBHOOK_SECRET: "secret" };
+}
+
+function postMessage(env, updateId, message) {
+  return worker.fetch(new Request("https://worker.test/webhook", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Telegram-Bot-Api-Secret-Token": "secret" },
+    body: JSON.stringify({ update_id: updateId, message }),
+  }), env);
+}
+
+test("reuses the DeviantArt session across messages", async (t) => {
+  const calls = { home: 0, init: 0, telegram: [] };
+  t.after(installFakeCache());
+  t.after(installFetchHarness(calls));
+  const env = webhookEnv();
+  const base = { from: { id: 42 }, chat: { id: 500, type: "private" } };
+
+  await postMessage(env, 101, { ...base, message_id: 1, text: "https://www.deviantart.com/artist/art/work-111" });
+  await postMessage(env, 102, { ...base, message_id: 2, text: "https://www.deviantart.com/artist/art/work-222" });
+
+  assert.equal(calls.home, 1); // 只请求了一次 DeviantArt 首页
+  assert.equal(calls.init, 2);
+  assert.equal(calls.telegram.length, 2);
+});
+
+test("skips duplicate updates and repeated album links", async (t) => {
+  const calls = { home: 0, init: 0, telegram: [] };
+  t.after(installFakeCache());
+  t.after(installFetchHarness(calls));
+  const env = webhookEnv();
+  const chat = { id: 501, type: "private" };
+
+  // 同一个 update_id 投递两次：只处理一次。
+  const once = { from: { id: 42 }, chat, message_id: 10, text: "https://www.deviantart.com/artist/art/work-333" };
+  await postMessage(env, 201, once);
+  await postMessage(env, 201, once);
+  assert.equal(calls.init, 1);
+  assert.equal(calls.telegram.length, 1);
+
+  // 同一相册的两张照片都带链接：只处理第一条。
+  await postMessage(env, 202, {
+    from: { id: 42 }, chat, message_id: 11,
+    caption: "https://www.deviantart.com/artist/art/work-444", media_group_id: "album-1",
+    photo: [{ file_id: "a" }],
+  });
+  await postMessage(env, 203, {
+    from: { id: 42 }, chat, message_id: 12,
+    caption: "https://www.deviantart.com/artist/art/work-555", media_group_id: "album-1",
+    photo: [{ file_id: "b" }],
+  });
+  assert.equal(calls.init, 2);
+  assert.equal(calls.telegram.length, 2);
+});
+
+test("limits how many links one chat may process per minute", async (t) => {
+  const calls = { home: 0, init: 0, telegram: [] };
+  t.after(installFakeCache());
+  t.after(installFetchHarness(calls));
+  const env = webhookEnv();
+  const chat = { id: 502, type: "private" };
+
+  for (let i = 0; i < 16; i += 1) {
+    await postMessage(env, 300 + i, {
+      from: { id: 42 }, chat, message_id: 20 + i,
+      text: `https://www.deviantart.com/artist/art/work-${600 + i}`,
+    });
+  }
+
+  assert.equal(calls.init, 15); // 前 15 个链接被处理
+  assert.equal(calls.telegram.length, 16); // 15 条媒体 + 1 条限流提示
+  assert.match(calls.telegram.at(-1).body.text, /操作太快/);
+  assert.equal(calls.telegram.at(-1).url.endsWith("sendMessage"), true);
+});

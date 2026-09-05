@@ -13,6 +13,14 @@ const HELP_TEXT = `发送 DeviantArt 单作品链接或 fav.me 短链，我会�
 const ABOUT_TEXT = `DeviantDrop：把 DeviantArt 作品「丢」进 Telegram 的 Bot。\n\n发送 DeviantArt 作品页或 fav.me 短链，即可收到图片、视频或 GIF；每条回复的媒体都会附带原作品页链接。\n\n开源项目（MIT）：${REPO}\n源码、部署与使用说明都在仓库里，欢迎 star、提 issue。`;
 const HINT_TEXT = `没有找到可下载的 DeviantArt 链接。\n\n发送 DeviantArt 作品页或 fav.me 短链，即可收到图片、视频或 GIF。\n/help 查看用法，/about 查看项目与源码。`;
 
+// 生产加固参数（README「限流与可靠性」有说明）。
+const SESSION_TTL_SECONDS = 600; // DA 匿名 session 跨消息复用时长
+const UPDATE_DEDUPE_SECONDS = 90; // 同一 Telegram update 去重窗口（防超时重试重复发送）
+const GROUP_DEDUPE_SECONDS = 60; // 同一相册只处理第一条带链接的消息
+const RATE_WINDOW_MS = 60_000;
+const RATE_MAX_LINKS = 15; // 每个聊天每分钟最多处理的链接数
+const RATE_TEXT = `操作太快了：这个聊天每分钟最多处理 ${RATE_MAX_LINKS} 个作品链接，请稍后再试。`;
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -38,6 +46,13 @@ export default {
     const message = update.message;
     if (!message?.chat?.id) return new Response("OK");
 
+    // Telegram 在超时/断连后会重试同一个 update：若已处理完成过，直接跳过，
+    // 避免把同一批作品重复发送。登记发生在处理完成之后（见下方），因此中途
+    // 被平台掐断的重试仍会重新处理——宁可部分重复，也不丢消息。
+    if (Number.isInteger(update.update_id) && await cacheGet("upd", `u:${update.update_id}`)) {
+      return new Response("OK");
+    }
+
     try {
       await handleMessage(message, env, url.origin);
     } catch (error) {
@@ -51,6 +66,9 @@ export default {
       } catch {
         // Telegram 自身不可用时没有第二条可靠通知通道。
       }
+    }
+    if (Number.isInteger(update.update_id)) {
+      await cacheSet("upd", `u:${update.update_id}`, true, UPDATE_DEDUPE_SECONDS);
     }
     return new Response("OK");
   },
@@ -100,19 +118,39 @@ async function handleMessage(message, env, origin) {
     return;
   }
 
-  // ponytail: 单次最多 5 个链接；高吞吐场景应接 Queue，而不是拖长 webhook 请求。
+  // ponytail: 单条消息最多 5 个链接；高吞吐/长时间任务应接 Queue，而不是拖长 webhook。
   const selected = links.slice(0, MAX_LINKS);
-  const session = await createDeviantArtSession();
-  for (let index = 0; index < selected.length; index += 1) {
-    try {
-      await sendDeviantArt(new URL(selected[index]), message, env, origin, session);
-    } catch (error) {
-      await telegram(env, "sendMessage", {
-        chat_id: message.chat.id,
-        text: `${selected.length > 1 ? `第 ${index + 1} 个链接` : ""}处理失败：${publicError(error)}`,
-        reply_parameters: { message_id: message.message_id },
-      });
+
+  // 相册里多张照片若都带链接，只处理最先到达的那条，避免对同一组图连发多份。
+  if (message.media_group_id) {
+    const groupKey = `g:${message.chat.id}:${message.media_group_id}`;
+    if (await cacheGet("grp", groupKey)) return;
+    await cacheSet("grp", groupKey, true, GROUP_DEDUPE_SECONDS);
+  }
+
+  // 每聊天每分钟的链接预算：超出部分发提示后跳过，防止单聊把 DeviantArt/Telegram 打爆。
+  const budget = await takeLinkBudget(message.chat.id, selected.length);
+  const pending = selected.slice(0, budget);
+  if (pending.length > 0) {
+    const session = await getDeviantArtSession();
+    for (let index = 0; index < pending.length; index += 1) {
+      try {
+        await sendDeviantArt(new URL(pending[index]), message, env, origin, session);
+      } catch (error) {
+        await telegram(env, "sendMessage", {
+          chat_id: message.chat.id,
+          text: `${pending.length > 1 ? `第 ${index + 1} 个链接` : ""}处理失败：${publicError(error)}`,
+          reply_parameters: { message_id: message.message_id },
+        });
+      }
     }
+  }
+  if (budget < selected.length) {
+    await telegram(env, "sendMessage", {
+      chat_id: message.chat.id,
+      text: RATE_TEXT,
+      reply_parameters: { message_id: message.message_id },
+    });
   }
   if (links.length > selected.length) {
     await telegram(env, "sendMessage", {
@@ -133,6 +171,56 @@ function isOwnForward(message, env) {
     message.via_bot?.id,
   ];
   return senderIds.includes(botId);
+}
+
+// —— 轻量共享存储层 ——
+// Cloudflare Cache API（caches.default）每个 Worker 默认可用且跨请求共享，
+// TTL 由 Cache-Control 控制；纯 Node 测试/本地无缓存环境里 cacheGet/cacheSet
+// 自动为空操作，相关加固随之停用，不影响原有正确性。
+function cacheApi() {
+  return typeof globalThis.caches?.default?.match === "function" ? globalThis.caches.default : null;
+}
+
+async function cacheGet(namespace, key) {
+  const store = cacheApi();
+  if (!store) return null;
+  const hit = await store.match(cacheUrl(namespace, key));
+  return hit ? hit.json().catch(() => null) : null;
+}
+
+async function cacheSet(namespace, key, value, ttlSeconds) {
+  const store = cacheApi();
+  if (!store) return;
+  await store.put(cacheUrl(namespace, key), new Response(JSON.stringify(value), {
+    headers: { "Cache-Control": `public, max-age=${ttlSeconds}` },
+  }));
+}
+
+function cacheUrl(namespace, key) {
+  return `https://deviantdrop.cache.internal/${namespace}/${encodeURIComponent(key)}`;
+}
+
+// DA 匿名 session（CSRF + cookie）与聊天无关，跨消息、跨聊天复用可显著减少
+// 对 DeviantArt 的请求总量，降低触发自适应限流的概率。
+async function getDeviantArtSession() {
+  const cached = await cacheGet("da", "session");
+  if (cached?.csrf) return cached;
+  const session = await createDeviantArtSession();
+  await cacheSet("da", "session", session, SESSION_TTL_SECONDS);
+  return session;
+}
+
+// 每聊天滑动窗口限流：返回本次允许处理的链接数（<= count）。
+async function takeLinkBudget(chatId, count) {
+  if (!cacheApi()) return count;
+  const now = Date.now();
+  let state = await cacheGet("rl", `chat:${chatId}`);
+  if (!state || now - state.start >= RATE_WINDOW_MS) state = { start: now, used: 0 };
+  const allowed = Math.min(count, Math.max(0, RATE_MAX_LINKS - state.used));
+  state.used += allowed;
+  // ponytail: 读改写非原子；webhook max_connections=1 使同一聊天的请求基本串行，够用。
+  await cacheSet("rl", `chat:${chatId}`, state, Math.ceil(RATE_WINDOW_MS / 1000));
+  return allowed;
 }
 
 async function createDeviantArtSession() {
