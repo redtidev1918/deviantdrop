@@ -10,13 +10,16 @@
 
 ---
 
-## [Unreleased]
+## [1.4.0] - 2026-09-06
 
-### 自动化
-- 新增 CI：每次推送/PR 自动跑测试（npm test）。
-- 新增 Release 自动化：打 `v*` tag 即自动测试并从 CHANGELOG 生成 GitHub Release。
-- 本地一键脚本：`npm run login`（OAuth 登录并自动写入 VPS + 重启）、`npm run deploy:vps`、`npm run logs`。
-- OAuth refresh token 支持轮换持久化；登录脚本自动打开浏览器。
+### 新增
+- **OAuth 用户登录（替代会过期的 Cookie）**：`npm run login` 一次授权自动写入 VPS 并重启；refresh token 支持轮换持久化，登录态长期有效。
+- 成熟 / NSFW 作品用用户 token 走官方接口取**未打码原图**；匿名/登录失效时明确提示「账号未登录成熟内容，仅打码预览」。
+- 自动化：新增 CI（每次 push/PR 跑测试）与 Release workflow（打 `v*` tag 自动生成 Release）；新增 `npm run deploy:vps`、`npm run logs`。
+
+### 修复
+- 修复服务器上传图片、视频、相册反复报「缺少 photo/media」的问题（上传自动重建重试，最多 3 次；相册改由 Telegram 服务端合并）。
+- 原图额度受限（免费账号每日额度）时自动降级最高清展示图并注明，不再直接失败。
 
 ## [1.3.2] - 2026-09-06
 
