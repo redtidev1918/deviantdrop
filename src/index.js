@@ -572,15 +572,30 @@ async function getOfficialToken(env) {
   const cached = await cacheGet("api", "token");
   if (cached?.token) return cached.token;
   const endpoint = new URL(DA_TOKEN_URL);
-  endpoint.search = new URLSearchParams({
-    grant_type: "client_credentials",
-    client_id: env.CLIENT_ID,
-    client_secret: env.CLIENT_SECRET,
-  });
+  if (env.DA_REFRESH_TOKEN) {
+    // 用户 OAuth：refresh token 持久化，access 自动续期（登录一次，长期有效）
+    endpoint.search = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: env.DA_REFRESH_TOKEN,
+      client_id: env.CLIENT_ID,
+      client_secret: env.CLIENT_SECRET,
+    });
+  } else {
+    endpoint.search = new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: env.CLIENT_ID,
+      client_secret: env.CLIENT_SECRET,
+    });
+  }
   const response = await guardedFetch(endpoint, { method: "POST", headers: DA_HEADERS, signal: AbortSignal.timeout(15_000) }, "DeviantArt 官方 API");
   const data = await response.json().catch(() => null);
   if (!response.ok || !data?.access_token) {
-    throw new Error("DeviantArt 官方 API 凭据无效或已被拒绝，请检查 CLIENT_ID/CLIENT_SECRET");
+    const reason = data?.error_description || `HTTP ${response.status}`;
+    throw new Error(
+      env.DA_REFRESH_TOKEN
+        ? `DeviantArt 登录已过期，请重新登录（${reason}）`
+        : "DeviantArt 官方 API 凭据无效或已被拒绝，请检查 CLIENT_ID/CLIENT_SECRET",
+    );
   }
   const ttl = Math.max(120, Number(data.expires_in ?? 3600) - 60);
   await cacheSet("api", "token", { token: data.access_token }, ttl);

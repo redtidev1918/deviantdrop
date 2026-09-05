@@ -90,6 +90,7 @@ const env = {
   CLIENT_ID: process.env.CLIENT_ID,
   CLIENT_SECRET: process.env.CLIENT_SECRET,
   DA_COOKIES: process.env.DA_COOKIES,
+  DA_REFRESH_TOKEN: process.env.DA_REFRESH_TOKEN,
 };
 for (const key of ["BOT_TOKEN", "WEBHOOK_SECRET"]) {
   if (!env[key]) {

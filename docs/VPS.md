@@ -107,6 +107,27 @@ DeviantArt 登录 Cookie 交给 Bot。
 > 注意：Cookie 等同账号登录态，别提交到 git（`.env` 已被 .gitignore 排除）。
 > 好友限定/仅订阅可见的作品仍可能拿不到；公开但标了 Mature 的作品，登录后即可下原图。
 
+## 4.6 登录 DeviantArt（持久化，推荐替代 Cookie）
+
+Cookie 会过期且无法自动续期；用 OAuth 登录一次，Bot 之后自动续期、长期有效（成熟/NSFW 原图也走此登录态）：
+
+1. 在 deviantart.com/developers 你的 App 的 **OAuth2 Redirect URI Whitelist** 里加一行：`http://127.0.0.1:8787/callback`
+2. 本机运行（会提示打开浏览器授权，并把 refresh_token 打印出来）：
+
+   ```bash
+   node scripts/da-login.mjs 76744
+   ```
+
+3. 把打印出的 refresh_token 写进服务器 `.env`：
+
+   ```dotenv
+   DA_REFRESH_TOKEN=你得到的refresh_token
+   ```
+
+4. `docker compose up -d` 重启；删除/清空 `DA_COOKIES` 即可（OAuth 优先）。
+
+> 原图下载仍受 DeviantArt 免费账号每日额度限制；OAuth 解决的是“登录态/打码”，不是额度。
+
 ## 5. 验证与排错
 
 ```bash
