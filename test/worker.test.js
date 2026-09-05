@@ -626,7 +626,10 @@ test("sends additional media of a multimedia deviation", async (t) => {
     text: "https://www.deviantart.com/artist/art/group-999999999",
   });
 
-  const mediaCount = sends.filter((s) => /send(Photo|Video|Animation)$/.test(s.url)).length;
+  const group = sends.find((s) => s.url.endsWith("sendMediaGroup"));
   assert.equal(initCalls, 1);
-  assert.equal(mediaCount, 3); // 主图 + 2 张附加图
+  assert.ok(group, "应使用 sendMediaGroup 相册发送");
+  assert.equal(group.body.media.length, 3); // 主图 + 2 张附加图
+  assert.match(group.body.media[0].caption, /组图/);
+  assert.equal(group.body.media[1].caption, undefined); // 只有第一张带 caption
 });
