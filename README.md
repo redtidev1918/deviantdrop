@@ -61,65 +61,46 @@ Bot 内置了防滥用/防重复（常量在 `src/index.js` 顶部，可直接�
 
 ## 部署
 
-要求 Node.js 18+ 和 Cloudflare 账号。
+Bot 必须跑在 **DeviantArt 放行的出口**上（DA 封锁数据中心出口；国内服务器需经
+clash/mihomo 等代理，实测机场出口可用）。完整步骤见 **[docs/VPS.md](docs/VPS.md)**，
+推荐两种方式：
+
+**Docker Compose（推荐）**
 
 ```bash
-npm install
-npx wrangler login
-npx wrangler secret put BOT_TOKEN
-npx wrangler secret put WEBHOOK_SECRET
-npm run deploy
+cp .env.example .env    # 填 BOT_TOKEN / WEBHOOK_SECRET / 官方 API 凭据；国内机器填 HTTP(S)_PROXY
+docker compose up -d --build
 ```
 
-### 配置 DeviantArt 官方 API（必需）
-
-DA 的网页接口对云出口封锁，本 Bot 依赖官方 OAuth API。需要一个 DeviantArt 账号，在 [deviantart.com/developers](https://www.deviantart.com/developers/) 注册 App（Client type 选 **Confidential**），拿到 Client ID / Client Secret 后写入 secrets（不需要把它们写进任何代码或仓库）：
+**直接 Node 运行**
 
 ```bash
-npx wrangler secret put CLIENT_ID
-npx wrangler secret put CLIENT_SECRET
+npm install --omit=dev
+export BOT_TOKEN=... WEBHOOK_SECRET=... CLIENT_ID=... CLIENT_SECRET=...
+export MODE=poll HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890
+node src/main.js
 ```
 
-`WEBHOOK_SECRET` 只能使用字母、数字、下划线和连字符。可用 `openssl rand -hex 32` 生成。部署后注册 Telegram webhook：
+要点：
 
-```bash
-export BOT_TOKEN='123456789:replace_me'
-export WEBHOOK_SECRET='replace_with_a_random_string'
-export WORKER_URL='https://deviantdrop.<你的账号>.workers.dev'
+- **MODE=poll（默认）**：getUpdates 长轮询，无需公网地址/域名/证书；`MODE=webhook` 需要 HTTPS 反代并注册 setWebhook（见 docs）。
+- **DeviantArt 官方 API 凭据（必需）**：在 [deviantart.com/developers](https://www.deviantart.com/developers/) 注册 Confidential 应用拿 Client ID/Secret，填进 `.env`/环境变量（不要入库）。
+- 国内服务器出口代理：`.env` 中 `HTTP_PROXY=http://127.0.0.1:7890`（指向本机 clash）；订阅热更新见 `scripts/refresh-clash.sh`。
+- 先跑 `npm run detect`（`scripts/detect-da.mjs`）确认出口可用。
+- 命令菜单（`/start /help /about`）注册：见 docs/VPS.md。
 
-curl -fsS "https://api.telegram.org/bot${BOT_TOKEN}/setWebhook" \
-  --data-urlencode "url=${WORKER_URL}/webhook" \
-  --data-urlencode "secret_token=${WEBHOOK_SECRET}" \
-  --data-urlencode 'allowed_updates=["message"]' \
-  --data-urlencode 'max_connections=1'
-```
-
-让 `/start`、`/help`、`/about` 出现在聊天输入框的「/」菜单里（用 @BotFather 创建 Bot 后执行一次即可）：
-
-```bash
-curl -fsS "https://api.telegram.org/bot${BOT_TOKEN}/setMyCommands" \
-  -H 'Content-Type: application/json' \
-  -d '[{"command":"start","description":"开始使用"},{"command":"help","description":"查看用法"},{"command":"about","description":"项目介绍与源码仓库"}]'
-```
-
-Bot 默认允许所有用户。私有 Bot 应配置逗号分隔的 Telegram user id：
-
-```bash
-npx wrangler secret put ALLOWED_USER_IDS
-```
-
-不要把真实 token 写入 `wrangler.jsonc`、Git 或日志。本地开发时将 `.dev.vars.example` 复制为 `.dev.vars`。
-
+> 早期 Cloudflare Workers 形态代码仍在仓库中（wrangler.jsonc 等），仅适合未被 DA
+> 封禁的自建出口，不建议继续使用。
 ## 验证与排错
 
 ```bash
-npm run check
-curl -fsS https://你的-worker.workers.dev/
-curl -fsS "https://api.telegram.org/bot${BOT_TOKEN}/getWebhookInfo"
-npx wrangler tail
+docker compose logs -f deviantdrop          # 轮询模式持续 getUpdates
+node scripts/detect-da.mjs <client_id> <client_secret>   # 出口放行检测
+npm run check                               # 本地 12 项测试 + 语法检查
 ```
 
-健康检查应返回 `{"ok":true,"service":"deviantdrop"}`。测试覆盖链接实体、多链接/session 复用、图片/视频/GIF 分类、404 用户提示、webhook 鉴权、签名媒体代理，以及 `/about` 命令、媒体 caption 解析和无链接消息/转发自己消息的忽略规则。
+> 早期 Cloudflare Workers 形态代码仍在仓库中（wrangler.jsonc 等），仅适合未被 DA
+> 封禁的自建出口，不建议继续使用。
 
 ## 实现来源
 
