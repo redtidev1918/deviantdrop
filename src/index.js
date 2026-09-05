@@ -662,6 +662,7 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null) 
   const docFalls = [];
   let compressedAny = false;
   let usedFallbackAny = false;
+  let usedBlurredAny = false;
   for (let i = 0; i < items.length; i += 1) {
     const indexLabel = `第 ${i + 1}/${items.length} 张`;
     let response = await guardedFetch(items[i].url, {
@@ -709,6 +710,7 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null) 
     if (itemFallback) {
       extension = "jpg";
       usedFallbackAny = true;
+      if (/blur_/.test(items[i].display || "")) usedBlurredAny = true;
     }
     if (items[i].kind === "photo" && bytes.length > PHOTO_MAX_BYTES) {
       if (onStatus) await onStatus(`正在压缩 ${indexLabel}…`);
@@ -726,7 +728,8 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null) 
   }
   const notes = [];
   if (compressedAny) notes.push("部分原图超过 10MB，已压缩发送");
-  if (usedFallbackAny) notes.push("部分原图额度受限，已用最高清展示图替代");
+  if (usedBlurredAny) notes.push("账号未登录成熟内容，仅打码预览");
+  else if (usedFallbackAny) notes.push("部分原图额度受限，已用最高清展示图替代");
   const fullCaption = (notes.length === 0 ? firstCaption : `${firstCaption}（${notes.join("；")}）`).slice(0, 1024);
   const results = [];
   const mediaForm = () => {
@@ -899,7 +902,8 @@ async function uploadMedia(env, kind, mediaUrl, caption, message, onStatus = nul
   }
   if (usedFallback) {
     extension = "jpg";
-    captionText = `${captionText}（原图额度受限，已用最高清展示图替代）`;
+    const blurred = /blur_/.test(fallbackUrl || "");
+    captionText = `${captionText}（${blurred ? "账号未登录成熟内容或额度受限，仅能发送打码预览" : "原图额度受限，已用最高清展示图替代"}）`;
   }
   const makeForm = (field) => {
     const form = new FormData();
