@@ -732,26 +732,36 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null) 
     for (let i = 0; i < entries.length; i += 1) {
       const { bytes, extension } = entries[i];
       const form = mediaForm("photo");
-      console.error("[album-photo] i=%d bytes=%d ext=%s", i, bytes.length, extension);
       form.set("photo", new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `photo${i}.${extension}`);
       form.set("media_group_id", groupId);
       if (i === 0) form.set("caption", fullCaption);
       else form.delete("reply_parameters");
-      results.push(await telegramForm(env, "sendPhoto", form));
+      results.push(await telegramForm(env, "sendPhoto", () => {
+        const f = mediaForm("photo");
+        f.set("photo", new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `photo${i}.${extension}`);
+        f.set("media_group_id", groupId);
+        if (i === 0) f.set("caption", fullCaption);
+        else f.delete("reply_parameters");
+        return f;
+      }));
     }
   } else if (entries.length === 1) {
     const { bytes, extension } = entries[0];
-    const form = mediaForm("photo");
-    form.set("caption", fullCaption);
-    form.set("photo", new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `photo0.${extension}`);
     if (onStatus) onStatus("正在发送…");
-    results.push(await telegramForm(env, "sendPhoto", form));
+    results.push(await telegramForm(env, "sendPhoto", () => {
+      const f = mediaForm("photo");
+      f.set("caption", fullCaption);
+      f.set("photo", new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `photo0.${extension}`);
+      return f;
+    }));
   }
   for (const doc of docFalls) {
     if (onStatus) onStatus("正在发送（超大原图以文件发送）…");
-    const form = mediaForm("document");
-    form.set("document", new Blob([doc.bytes], { type: "application/octet-stream" }), `original.${doc.extension}`);
-    results.push(await telegramForm(env, "sendDocument", form));
+    results.push(await telegramForm(env, "sendDocument", () => {
+      const f = mediaForm("document");
+      f.set("document", new Blob([doc.bytes], { type: "application/octet-stream" }), `original.${doc.extension}`);
+      return f;
+    }));
   }
   return results;
 }
@@ -883,7 +893,6 @@ async function uploadMedia(env, kind, mediaUrl, caption, message, onStatus = nul
     extension = "jpg";
     captionText = `${captionText}（原图额度受限，已用最高清展示图替代）`;
   }
-  if (kind === "photo") console.error("[photo] bytes=%d ext=%s sendAs=%s", bytes.length, extension, sendAs);
   const makeForm = (field) => {
     const form = new FormData();
     form.set("chat_id", String(message.chat.id));
@@ -898,7 +907,7 @@ async function uploadMedia(env, kind, mediaUrl, caption, message, onStatus = nul
   } catch (error) {
     // 照片（含压缩后）仍被拒时再按文档试一次
     if (kind === "photo" && isTooBigError(error)) {
-      return telegramForm(env, MEDIA_FIELDS.document[0], makeForm("document"));
+      return telegramForm(env, MEDIA_FIELDS.document[0], () => makeForm("document"));
     }
     throw error;
   }
@@ -924,8 +933,14 @@ async function compressPhoto(bytes) {
   }
 }
 
-async function telegramForm(env, method, form) {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+async function telegramForm(env, method, formOrFactory) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    let form;
+    try {
+      form = typeof formOrFactory === "function" ? formOrFactory() : formOrFactory;
+    } catch (error) {
+      throw error;
+    }
     let response;
     try {
       response = await fetch(`${TELEGRAM_API}/bot${env.BOT_TOKEN}/${method}`, {
@@ -934,28 +949,38 @@ async function telegramForm(env, method, form) {
         signal: AbortSignal.timeout(180_000),
       });
     } catch (error) {
-      if (attempt === 0) { await sleep(1000); continue; }
+      if (attempt < 2) {
+        console.error(`[tg] ${method} 网络错误，重试 ${attempt + 1}`);
+        await sleep(1000 * (attempt + 1));
+        continue;
+      }
       throw new Error("Telegram 连接失败或超时，请稍后再试");
     }
     const result = await response.json().catch(() => null);
     const retryAfter = Number(result?.parameters?.retry_after);
-    if (response.status === 429 && retryAfter > 0 && attempt === 0) {
+    if (response.status === 429 && retryAfter > 0) {
       await sleep(Math.min(retryAfter, 10) * 1000);
       continue;
     }
     if (!response.ok || !result?.ok) {
-      const description = result?.description || `Telegram 返回 HTTP ${response.status}`;
+      const description = result?.description || `HTTP ${response.status}`;
+      // 代理出口抖动会让 multipart 丢文件，表现为 no photo / media required：
+      // 重建表单再发（文件字节仍在闭包里，不重新下载）
+      const transient = /no photo in the request|media.*required|media is required/i.test(description);
+      if (transient && attempt < 2) {
+        console.error(`[tg] ${method} ${description} — 重建重试 ${attempt + 1}`);
+        await sleep(800 * (attempt + 1));
+        continue;
+      }
       console.error(`[tg] ${method} 失败: ${description}`);
       throw new Error(description);
     }
     return result.result;
   }
-  throw new Error("Telegram 暂时限流，请稍后重试");
+  throw new Error("Telegram 上传失败，请稍后重试");
 }
 
-// Telegram 照片上限 10 MiB；文档可到 50 MiB。照片超过该阈值提前改发文档
-// （与 TelePost 的 reclassify_oversized_photos 同一阈值语义，取 9.5 MiB 留余量）。
-const PHOTO_MAX_BYTES = 9.5 * 1024 * 1024;
+
 
 // wixmp 原图下载被拒：403/429 多为 DA 免费账号的原图下载限额已用尽（daviewer/dakit
 // 同款语义：“Free download limit reached”）。
@@ -970,12 +995,6 @@ function isTooBigError(error) {
   const text = error instanceof Error ? error.message : String(error);
   return /file is too big|image is too big|too large|PHOTO_INVALID_DIMENSIONS/i.test(text);
 }
-const MEDIA_FIELDS = {
-  photo: ["sendPhoto", "photo"],
-  video: ["sendVideo", "video"],
-  animation: ["sendAnimation", "animation"],
-  document: ["sendDocument", "document"],
-};
 
 function concatBytes(chunks) {
   let size = 0;
@@ -988,6 +1007,13 @@ function concatBytes(chunks) {
   }
   return out;
 }
+
+const MEDIA_FIELDS = {
+  photo: ["sendPhoto", "photo"],
+  video: ["sendVideo", "video"],
+  animation: ["sendAnimation", "animation"],
+  document: ["sendDocument", "document"],
+};
 
 const MIME_BY_EXTENSION = {
   jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp",
