@@ -725,24 +725,19 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null) 
     return form;
   };
   if (entries.length >= 2) {
-    const form = mediaForm("media");
-    const parts = [];
-    for (let i = 0; i < entries.length; i += 1) {
-      const { bytes, extension, kind } = entries[i];
-      form.set(`file${i}`, new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `photo${i}.${extension}`);
-      parts.push({ type: typeOf[kind] || "photo", media: `attach://file${i}`, ...(i === 0 ? { caption: fullCaption } : {}) });
-    }
-    form.set("media", JSON.stringify(parts));
-    console.error(
-      "[album] entries=%d mediaJson=%s files0=%d files1=%d",
-      entries.length,
-      String(form.get("media")).slice(0, 160),
-      form.getAll("file0").length,
-      form.getAll("file1").length,
-    );
+    // 相册：用同一 media_group_id 逐张 sendPhoto，Telegram 服务端合成一条相册
+    // （sendMediaGroup 的 multipart 在我们的请求链路里触发 “media required”，此路更稳）。
+    const groupId = `dd${Date.now()}${Math.random().toString(36).slice(2, 8)}`;
     if (onStatus) onStatus("正在发送相册…");
-    const sent = await telegramForm(env, "sendMediaGroup", form);
-    results.push(...(Array.isArray(sent) ? sent : [sent]));
+    for (let i = 0; i < entries.length; i += 1) {
+      const { bytes, extension } = entries[i];
+      const form = mediaForm("photo");
+      form.set("photo", new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `photo${i}.${extension}`);
+      form.set("media_group_id", groupId);
+      if (i === 0) form.set("caption", fullCaption);
+      else form.delete("reply_parameters");
+      results.push(await telegramForm(env, "sendPhoto", form));
+    }
   } else if (entries.length === 1) {
     const { bytes, extension } = entries[0];
     const form = mediaForm("photo");
