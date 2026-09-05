@@ -594,7 +594,7 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null) 
     const form = new FormData();
     const mediaParts = [];
     for (let i = 0; i < items.length; i += 1) {
-      if (onStatus) onStatus(`正在下载第 ${i + 1}/${items.length} 张…`);
+      const indexLabel = `第 ${i + 1}/${items.length} 张`;
       const response = await guardedFetch(items[i].url, {
         headers: { ...DA_HEADERS, Referer: DEVIANTART },
         signal: AbortSignal.timeout(180_000),
@@ -603,10 +603,28 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null) 
         response.body?.cancel();
         throw new Error(`媒体下载失败（HTTP ${response.status}）`);
       }
-      const blob = new Blob([new Uint8Array(await response.arrayBuffer())], {
-        type: MIME_BY_EXTENSION[guessExtension(items[i].url, "photo")] || "application/octet-stream",
-      });
-      form.set(`file${i}`, blob, `photo${i}.${guessExtension(items[i].url, "photo")}`);
+      // 流式读取并报告每张的下载百分比
+      const totalBytes = Number(response.headers.get("Content-Length")) || 0;
+      const fileChunks = [];
+      let received = 0;
+      let lastPct = -1;
+      const reader = response.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        fileChunks.push(value);
+        received += value.byteLength;
+        if (onStatus && totalBytes > 0) {
+          const pct = Math.floor((received / totalBytes) * 100);
+          if (pct % 5 === 0 && pct > lastPct) {
+            lastPct = pct;
+            onStatus(`正在下载 ${indexLabel} ${pct}%`);
+          }
+        }
+      }
+      const fileBytes = concatBytes(fileChunks);
+      const extension = guessExtension(items[i].url, "photo");
+      form.set(`file${i}`, new Blob([fileBytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `photo${i}.${extension}`);
       mediaParts.push({
         type: typeOf[items[i].kind] || "photo",
         media: `attach://file${i}`,
