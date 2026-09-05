@@ -10,5 +10,8 @@ RUN npm ci --omit=dev
 COPY src ./src
 COPY README.md ./
 
+# 以非 root 运行（镜像自带 node 用户；应用只读代码、无写盘需求）
+USER node
+
 ENV NODE_ENV=production
 CMD ["node", "src/main.js"]
