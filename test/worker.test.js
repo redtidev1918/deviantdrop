@@ -423,6 +423,10 @@ test("resolves artwork via official API and archive.org UUID mapping", async (t)
   const UUID = "4141C2B4-BCA1-2A3E-7241-3FCFB091BA69";
   globalThis.fetch = async (input, init = {}) => {
     const url = String(input);
+    if (url === "https://www.deviantart.com/") {
+      // 网页出口被封：级联应落到官方 API 路径
+      return new Response("blocked", { status: 403 });
+    }
     if (url.startsWith("https://www.deviantart.com/oauth2/token")) {
       calls.token += 1;
       return Response.json({ access_token: "tok", expires_in: 3600 });
@@ -473,6 +477,10 @@ test("explains that fav.me short links need a canonical page URL on the official
   let notice;
   globalThis.fetch = async (input, init = {}) => {
     const url = String(input);
+    if (url === "https://www.deviantart.com/") {
+      // 网页出口被封：级联应落到官方 API 路径
+      return new Response("blocked", { status: 403 });
+    }
     if (url.startsWith("https://www.deviantart.com/oauth2/token")) {
       return Response.json({ access_token: "tok", expires_in: 3600 });
     }

@@ -149,21 +149,17 @@ async function handleMessage(message, env, origin) {
   // 每聊天每分钟的链接预算：超出部分发提示后跳过，防止单聊把 DeviantArt/Telegram 打爆。
   const budget = await takeLinkBudget(message.chat.id, selected.length);
   const pending = selected.slice(0, budget);
-  if (pending.length > 0) {
-    // 配置了官方 API 凭据时走官方解析（Workers 出口被 DA 网页 WAF 拦截）；
-    // 否则退回网页 session 路径（本地/自建出口可用）。
-    const useOfficial = Boolean(env.CLIENT_ID && env.CLIENT_SECRET);
-    const session = useOfficial ? null : await getDeviantArtSession();
-    for (let index = 0; index < pending.length; index += 1) {
-      try {
-        await sendDeviantArt(new URL(pending[index]), message, env, origin, session, useOfficial);
-      } catch (error) {
-        await telegram(env, "sendMessage", {
-          chat_id: message.chat.id,
-          text: `${pending.length > 1 ? `第 ${index + 1} 个链接` : ""}处理失败：${publicError(error)}`,
-          reply_parameters: { message_id: message.message_id },
-        });
-      }
+  // 一条消息内的多个链接共享同一个网页 session（备忘录；跨消息仍有 Cache 层复用）。
+  const sessionMemo = {};
+  for (let index = 0; index < pending.length; index += 1) {
+    try {
+      await sendDeviantArt(new URL(pending[index]), message, env, origin, sessionMemo);
+    } catch (error) {
+      await telegram(env, "sendMessage", {
+        chat_id: message.chat.id,
+        text: `${pending.length > 1 ? `第 ${index + 1} 个链接` : ""}处理失败：${publicError(error)}`,
+        reply_parameters: { message_id: message.message_id },
+      });
     }
   }
   if (budget < selected.length) {
@@ -253,8 +249,25 @@ async function createDeviantArtSession() {
   return { csrf, cookies: getCookies(home.headers) };
 }
 
-async function sendDeviantArt(url, message, env, origin, session, useOfficial = false) {
-  if (useOfficial) return sendDeviantArtOfficial(url, message, env, origin);
+// 解析并发送单个作品。双通道级联：
+//   1) 网页 _puppy 接口（出口可达时能力最全：新作品/视频/GIF/无需凭据，session 已缓存复用）；
+//   2) 网页不可达时，若配置了官方 API 凭据则走「官方 API + archive.org 存档映射」兜底。
+async function sendDeviantArt(url, message, env, origin, sessionMemo = {}) {
+  try {
+    const media = await resolveWebMedia(url, env, origin, sessionMemo);
+    await sendOne(media.kind, media.url, `${media.title}\n${url.href}`, message, env);
+    return;
+  } catch (error) {
+    if (!env.CLIENT_ID || !env.CLIENT_SECRET) throw error;
+    console.error("网页解析失败，转官方 API:", error instanceof Error ? error.message : String(error));
+  }
+  const official = await resolveOfficialMedia(url, env, origin);
+  await sendOne(official.kind, official.url, `${official.title}\n${url.href}`, message, env);
+}
+
+async function resolveWebMedia(url, env, origin, sessionMemo) {
+  if (!sessionMemo.session) sessionMemo.session = await getDeviantArtSession();
+  const session = sessionMemo.session;
   const target = parseDeviantArtTarget(url);
   const endpoint = new URL("/_puppy/dadeviation/init", DEVIANTART);
   endpoint.searchParams.set("deviationid", target.id);
@@ -271,13 +284,16 @@ async function sendDeviantArt(url, message, env, origin, session, useOfficial = 
     ...(session.cookies ? { Cookie: session.cookies } : {}),
   });
   const item = extractDeviantArtMedia(data.deviation);
-  const mediaUrl = await createProxyUrl(origin, item.url, env.WEBHOOK_SECRET);
-  await sendOne(item.kind, mediaUrl, `${item.title}\n${url.href}`, message, env);
+  return {
+    kind: item.kind,
+    url: await createProxyUrl(origin, item.url, env.WEBHOOK_SECRET),
+    title: item.title,
+  };
 }
 
 // —— 官方 OAuth API 解析路径（数字 id → archive.org 快照里的 UUID → deviation 取媒体）——
 
-async function sendDeviantArtOfficial(url, message, env, origin) {
+async function resolveOfficialMedia(url, env, origin) {
   const target = parseDeviantArtTarget(url);
   const uuid = await resolveDeviationUuid(target, url, env);
   const deviation = await officialApiGet(env, `deviation/${uuid}`);
@@ -285,9 +301,11 @@ async function sendDeviantArtOfficial(url, message, env, origin) {
   if (!mediaUrl) throw new Error("作品没有可用的公开媒体");
   const title = deviation?.title || "DeviantArt";
   const author = deviation?.author?.username;
-  const proxied = await createProxyUrl(origin, mediaUrl, env.WEBHOOK_SECRET);
-  const kind = extensionKind(mediaUrl) || "photo";
-  await sendOne(kind, proxied, `${title}${author ? ` — ${author}` : ""}\n${url.href}`, message, env);
+  return {
+    kind: extensionKind(mediaUrl) || "photo",
+    url: await createProxyUrl(origin, mediaUrl, env.WEBHOOK_SECRET),
+    title: `${title}${author ? ` — ${author}` : ""}`,
+  };
 }
 
 // 数字作品 id → UUID。官方 API 只认 UUID；唯一已知的公开映射藏在作品页内嵌 JSON 里，
