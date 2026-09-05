@@ -640,7 +640,7 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null) 
     }, "媒体下载");
     if (!response.ok) {
       response.body?.cancel();
-      throw new Error(`媒体下载失败（HTTP ${response.status}）`);
+      throw quotaOrMediaError(response.status);
     }
     const totalBytes = Number(response.headers.get("Content-Length")) || 0;
     const fileChunks = [];
@@ -785,7 +785,7 @@ async function uploadMedia(env, kind, mediaUrl, caption, message, onStatus = nul
   }, "媒体下载");
   if (!response.ok) {
     response.body?.cancel();
-    throw new Error(`媒体下载失败（HTTP ${response.status}）`);
+    throw quotaOrMediaError(response.status);
   }
   // 流式读取以报告下载进度（Telegram Bot API 没有上传进度事件，进度只能反映“下载”阶段）
   const totalBytes = Number(response.headers.get("Content-Length")) || 0;
@@ -893,6 +893,15 @@ async function telegramForm(env, method, form) {
 // Telegram 照片上限 10 MiB；文档可到 50 MiB。照片超过该阈值提前改发文档
 // （与 TelePost 的 reclassify_oversized_photos 同一阈值语义，取 9.5 MiB 留余量）。
 const PHOTO_MAX_BYTES = 9.5 * 1024 * 1024;
+
+// wixmp 原图下载被拒：403/429 多为 DA 免费账号的原图下载限额已用尽（daviewer/dakit
+// 同款语义：“Free download limit reached”）。
+function quotaOrMediaError(status) {
+  if (status === 403 || status === 429) {
+    return new Error("原图下载被 DeviantArt 限制：免费账号每日原图下载有限额，今天可能已用尽（稍后或明日重试，订阅 Core 可提升额度）");
+  }
+  return new Error(`媒体下载失败（HTTP ${status}）`);
+}
 
 function isTooBigError(error) {
   const text = error instanceof Error ? error.message : String(error);
