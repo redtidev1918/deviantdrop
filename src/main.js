@@ -11,6 +11,8 @@
 //   - poll    （默认）getUpdates 长轮询，无需公网入口/域名/证书；
 //   - webhook 本机起 HTTP 服务，需自行提供公网 HTTPS 反代并注册 setWebhook。
 import { createServer } from "node:http";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import { ProxyAgent, setGlobalDispatcher } from "undici";
 import worker, { handleUpdate } from "./index.js";
 
@@ -22,14 +24,40 @@ if (proxyUrl) {
 }
 
 // —— 进程内 Cache API（Cloudflare 语义的轻量实现）：去重/限流在单机同样生效 ——
+// 并持久化到磁盘，重启后 file_id 去重、限流窗口等仍保留。
 if (!globalThis.caches) {
+  const CACHE_FILE = process.env.CACHE_FILE || "/data/deviantdrop-cache.json";
   const entries = new Map();
+  try {
+    const saved = JSON.parse(readFileSync(CACHE_FILE, "utf8"));
+    for (const [url, entry] of Object.entries(saved)) {
+      if (entry && entry.expires > Date.now()) entries.set(url, entry);
+    }
+  } catch {
+    // 首次运行 / 文件不存在
+  }
+  let writeTimer = null;
+  const persist = () => {
+    try {
+      mkdirSync(dirname(CACHE_FILE), { recursive: true });
+      writeFileSync(CACHE_FILE, JSON.stringify(Object.fromEntries(entries)), "utf8");
+    } catch (error) {
+      console.error("缓存落盘失败:", error.message);
+    }
+  };
+  const schedulePersist = () => {
+    if (writeTimer) return;
+    writeTimer = setTimeout(() => { writeTimer = null; persist(); }, 500);
+  };
+  process.on("SIGTERM", () => { if (writeTimer) { clearTimeout(writeTimer); writeTimer = null; } persist(); });
+  process.on("SIGINT", () => { persist(); process.exit(0); });
+
   globalThis.caches = {
     default: {
       async match(input) {
         const hit = entries.get(new URL(String(input)).href);
         if (!hit || hit.expires <= Date.now()) return undefined;
-        return new Response(hit.body, { status: 200, headers: hit.headers });
+        return new Response(hit.body, { status: 200, headers: new Headers(hit.headers) });
       },
       async put(input, response) {
         const maxAge = Number(
@@ -38,8 +66,9 @@ if (!globalThis.caches) {
         entries.set(new URL(String(input)).href, {
           body: await response.text(),
           expires: Date.now() + maxAge * 1000,
-          headers: new Headers(response.headers),
+          headers: Object.fromEntries(response.headers),
         });
+        schedulePersist();
       },
     },
   };

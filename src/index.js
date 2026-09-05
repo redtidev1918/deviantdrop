@@ -170,6 +170,7 @@ async function handleMessage(message, env, origin) {
     try {
       if (nextIndex >= total) {
         await telegram(env, "deleteMessage", { chat_id: message.chat.id, message_id: statusId });
+        statusId = null; // 已删除，finally 不再重复删
       } else {
         await telegram(env, "editMessageText", {
           chat_id: message.chat.id,
@@ -290,9 +291,17 @@ async function createDeviantArtSession() {
 //   1) 网页 _puppy 接口（出口可达时能力最全：新作品/视频/GIF/无需凭据，session 已缓存复用）；
 //   2) 网页不可达时，若配置了官方 API 凭据则走「官方 API + archive.org 存档映射」兜底。
 async function sendDeviantArt(url, message, env, origin, sessionMemo = {}) {
+  const target = parseDeviantArtTarget(url);
+  // 媒体级去重：同一作品首次发过后缓存 Telegram file_id，再发直接用 file_id（零下载）。
+  const cached = await cacheGet("fid", `d:${target.id}`);
+  if (cached?.file_id) {
+    await sendFileById(cached.kind, cached.file_id, `${cached.title}\n${url.href}`, message, env);
+    return;
+  }
   try {
     const media = await resolveWebMedia(url, env, origin, sessionMemo);
-    await sendOne(media.kind, media.url, `${media.title}\n${url.href}`, message, env, !origin);
+    const sent = await sendOne(media.kind, media.url, `${media.title}\n${url.href}`, message, env, !origin);
+    await rememberFileId(target.id, media.kind, media.title, sent, env);
     return;
   } catch (error) {
     const text = error instanceof Error ? error.message : String(error);
@@ -302,7 +311,8 @@ async function sendDeviantArt(url, message, env, origin, sessionMemo = {}) {
     console.error("网页解析失败(网络)，转官方 API:", text);
   }
   const official = await resolveOfficialMedia(url, env, origin);
-  await sendOne(official.kind, official.url, `${official.title}\n${url.href}`, message, env, !origin);
+  const sent = await sendOne(official.kind, official.url, `${official.title}\n${url.href}`, message, env, !origin);
+  await rememberFileId(target.id, official.kind, official.title, sent, env);
 }
 
 async function resolveWebMedia(url, env, origin, sessionMemo) {
@@ -494,15 +504,45 @@ async function sendOne(kind, mediaUrl, caption, message, env, upload = false) {
   const text = String(caption).slice(0, 1024);
   if (upload) {
     // 轮询模式：Telegram 服务器拉不动 wixmp（需 Referer/UA），由 Bot 先下载再上传。
-    await uploadMedia(env, fields[0], fields[1], mediaUrl, text, message);
-    return;
+    return uploadMedia(env, fields[0], fields[1], mediaUrl, text, message);
   }
-  await telegram(env, fields[0], {
+  return telegram(env, fields[0], {
     chat_id: message.chat.id,
     [fields[1]]: mediaUrl,
     caption: text,
     reply_parameters: { message_id: message.message_id },
   });
+}
+
+// 用已缓存 file_id 直接重发（不再下载，Telegram 服务端去重）。
+async function sendFileById(kind, fileId, caption, message, env) {
+  const fields = {
+    photo: ["sendPhoto", "photo"],
+    video: ["sendVideo", "video"],
+    animation: ["sendAnimation", "animation"],
+  }[kind];
+  if (!fields) throw new Error("不支持的媒体类型");
+  await telegram(env, fields[0], {
+    chat_id: message.chat.id,
+    [fields[1]]: fileId,
+    caption: String(caption).slice(0, 1024),
+    reply_parameters: { message_id: message.message_id },
+  });
+}
+
+// 记住作品 → file_id 的映射，供后续复用（file_id 同 Bot 长期有效）。
+async function rememberFileId(id, kind, title, sent, env) {
+  const fileId = fileIdOf(sent, kind);
+  if (!fileId) return;
+  await cacheSet("fid", `d:${id}`, { file_id: fileId, kind, title }, 30 * 24 * 3600);
+}
+
+function fileIdOf(result, kind) {
+  const field = { photo: "photo", video: "video", animation: "animation" }[kind];
+  const value = result?.[field];
+  if (!value) return null;
+  if (kind === "photo") return Array.isArray(value) ? value.at(-1)?.file_id : value.file_id;
+  return value.file_id || null;
 }
 
 // 下载媒体并作为 multipart 文件上传给 Telegram（带 DA 所需 Referer/UA，规避 Telegram 拉不动）。
@@ -522,7 +562,7 @@ async function uploadMedia(env, method, field, mediaUrl, caption, message) {
   form.set("caption", caption);
   form.set("reply_parameters", JSON.stringify({ message_id: message.message_id }));
   form.set(field, new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `${field}.${extension}`);
-  await telegramForm(env, method, form);
+  return telegramForm(env, method, form);
 }
 
 async function telegramForm(env, method, form) {

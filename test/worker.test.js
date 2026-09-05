@@ -506,3 +506,39 @@ test("explains that fav.me short links need a canonical page URL on the official
   });
   assert.match(notice, /旧式\/短链/);
 });
+
+test("reuses the Telegram file_id for repeated links", async (t) => {
+  const originalFetch = globalThis.fetch;
+  let initCalls = 0;
+  const sends = [];
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url === "https://www.deviantart.com/") {
+      return new Response("window.__CSRF_TOKEN__ = 'csrf'");
+    }
+    if (url.includes("/_puppy/dadeviation/init")) {
+      initCalls += 1;
+      return Response.json({ deviation: { title: "作品", media: { baseUri: "https://images.wixmp.com/work.jpg" } } });
+    }
+    if (url.includes("api.telegram.org")) {
+      const body = JSON.parse(init.body);
+      sends.push(body);
+      // 返回带 photo 的 file_id，供记住并复用
+      return Response.json({ ok: true, result: { message_id: 99, photo: [{ file_id: "PHOTO_1" }] } });
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  t.after(installFakeCache());
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  const env = { BOT_TOKEN: "111:secret", WEBHOOK_SECRET: "secret" };
+  const link = "https://www.deviantart.com/artist/art/work-777777";
+  const msg = (id) => ({ from: { id: 42 }, chat: { id: 800, type: "private" }, message_id: id, text: link });
+
+  await postMessage(env, 501, msg(50));
+  await postMessage(env, 502, msg(51));
+
+  assert.equal(initCalls, 1); // 第二次不再走 DA
+  assert.equal(sends.filter((s) => s.photo === "PHOTO_1").length, 1); // 第二次用 file_id 重发
+  assert.equal(sends.filter((s) => typeof s.photo === "string" && s.photo.startsWith("https://")).length, 1); // 第一次用 URL 发送
+});
