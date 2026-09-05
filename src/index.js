@@ -339,22 +339,6 @@ async function resolveWebMedia(url, env, origin, sessionMemo) {
   });
   const deviation = data.deviation;
   const allowMature = Boolean(env.DA_COOKIES);
-
-  // 可下载作品（含登录后的成熟作品）：原图在作品页的“下载”链接里，
-  // init 的 fullview 不直接给 URL——从作品页 HTML 提取下载地址。
-  if (deviation?.isDownloadable === true) {
-    try {
-      const downloadUrl = await extractDownloadUrl(url.href, env, session);
-      const author = deviation.author?.username;
-      return {
-        kind: extensionKind(downloadUrl) || "photo",
-        url: await createProxyUrl(origin, downloadUrl, env.WEBHOOK_SECRET),
-        title: `${deviation.title || "DeviantArt"}${author ? ` — ${author}` : ""}`,
-      };
-    } catch (error) {
-      console.error("下载链接提取失败，回退媒体类型:", error instanceof Error ? error.message : String(error));
-    }
-  }
   const item = extractDeviantArtMedia(deviation, allowMature);
   return {
     kind: item.kind,
@@ -363,26 +347,6 @@ async function resolveWebMedia(url, env, origin, sessionMemo) {
   };
 }
 
-// 从作品页 HTML 里提取 https://www.deviantart.com/download/... 原图下载链接
-// （带登录 Cookie 时可用，含成熟作品原图）。
-async function extractDownloadUrl(pageUrl, env, session) {
-  const response = await guardedFetch(pageUrl, {
-    headers: {
-      Accept: "text/html",
-      ...DA_HEADERS,
-      ...(session.cookies ? { Cookie: session.cookies } : {}),
-    },
-    signal: AbortSignal.timeout(40_000),
-  }, "作品页");
-  if (!response.ok) {
-    response.body?.cancel();
-    throw new Error(`作品页请求失败（HTTP ${response.status}）`);
-  }
-  const html = await response.text();
-  const match = html.match(/https:\/\/www\.deviantart\.com\/download\/[^"'\\\s<>]+/);
-  if (!match) throw new Error("页面里没有找到下载链接");
-  return match[0].replace(/\\u0026/g, "&").replace(/&amp;/g, "&");
-}
 
 // —— 官方 OAuth API 解析路径（数字 id → archive.org 快照里的 UUID → deviation 取媒体）——
 
@@ -784,19 +748,22 @@ export function extractDeviantArtMedia(deviation, allowMature = false) {
   let url = videos[0]?.b;
   let kind = url ? "video" : null;
 
+  // baseUri 本身就是原始文件（现代接口形态，以扩展名结尾，如 .png/.jpg/.gif）：
+  // 直接 baseUri + token 下载原图。别去拼 /v1/fit 变体——那些 URL 带 token 也会 400/404。
+  if (!url && extensionKind(media.baseUri || "")) {
+    url = appendToken(media.baseUri, media.token);
+  }
   if (!url) {
     const full = types.find((item) => item?.t === "fullview");
     if (full?.b) url = appendToken(full.b, media.token);
     else if (full?.c) url = buildMediaUrl(media, full.c);
   }
-  // fullview 不可用（如登录后原图走下载链接、或该作品没给模板）时用 preview 兜底
+  // fullview 不可用（登录后原图即 baseUri 文件、或该作品没给模板）时用 preview 兜底
   if (!url) {
     const preview = types.find((item) => item?.t === "preview" && (item.c || item.b));
     if (preview?.b) url = appendToken(preview.b, media.token);
     else if (preview?.c) url = buildMediaUrl(media, preview.c);
   }
-  // 极端兜底：baseUri 本身就是带扩展名的文件（老接口形态）时才直接用，目录型会 400
-  if (!url && extensionKind(media.baseUri || "")) url = appendToken(media.baseUri, media.token);
   if (url && !kind) kind = extensionKind(url); // gif→animation、jpg→photo 等
   if (!url) throw new Error("DeviantArt 作品没有可用媒体");
   return {
