@@ -57,36 +57,40 @@ export default {
     } catch {
       return new Response("Bad request", { status: 400 });
     }
-    const message = update.message;
-    if (!message?.chat?.id) return new Response("OK");
-
-    // Telegram 在超时/断连后会重试同一个 update：若已处理完成过，直接跳过，
-    // 避免把同一批作品重复发送。登记发生在处理完成之后（见下方），因此中途
-    // 被平台掐断的重试仍会重新处理——宁可部分重复，也不丢消息。
-    if (Number.isInteger(update.update_id) && await cacheGet("upd", `u:${update.update_id}`)) {
-      return new Response("OK");
-    }
-
-    try {
-      await handleMessage(message, env, url.origin);
-    } catch (error) {
-      console.error(error instanceof Error ? error.message : String(error));
-      try {
-        await telegram(env, "sendMessage", {
-          chat_id: message.chat.id,
-          text: `处理失败：${publicError(error)}`,
-          reply_parameters: { message_id: message.message_id },
-        });
-      } catch {
-        // Telegram 自身不可用时没有第二条可靠通知通道。
-      }
-    }
-    if (Number.isInteger(update.update_id)) {
-      await cacheSet("upd", `u:${update.update_id}`, true, UPDATE_DEDUPE_SECONDS);
-    }
+    await handleUpdate(update, env, url.origin);
     return new Response("OK");
   },
 };
+
+// 处理单个 Telegram update。webhook 与长轮询共用同一入口。
+// origin 为 null 时（长轮询、无公网反代）媒体直接使用原始 URL 交给 Telegram 下载。
+export async function handleUpdate(update, env, origin = null) {
+  const message = update?.message;
+  if (!message?.chat?.id) return;
+
+  // Telegram 在超时/断连后会重试同一个 update：若已处理完成过，直接跳过，
+  // 避免把同一批作品重复发送。登记发生在处理完成之后，因此中途被掐断的
+  // 重试仍会重新处理——宁可部分重复，也不丢消息。
+  if (Number.isInteger(update.update_id) && await cacheGet("upd", `u:${update.update_id}`)) return;
+
+  try {
+    await handleMessage(message, env, origin);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    try {
+      await telegram(env, "sendMessage", {
+        chat_id: message.chat.id,
+        text: `处理失败：${publicError(error)}`,
+        reply_parameters: { message_id: message.message_id },
+      });
+    } catch {
+      // Telegram 自身不可用时没有第二条可靠通知通道。
+    }
+  }
+  if (Number.isInteger(update.update_id)) {
+    await cacheSet("upd", `u:${update.update_id}`, true, UPDATE_DEDUPE_SECONDS);
+  }
+}
 
 async function handleMessage(message, env, origin) {
   const allowed = String(env.ALLOWED_USER_IDS ?? "")
@@ -689,6 +693,8 @@ async function createProxyUrl(origin, upstream, secret) {
   if (!isSafePublicUrl(url) || !isMediaHost(url.hostname)) {
     throw new Error("媒体地址不在受信任的 DeviantArt CDN 上");
   }
+  // 长轮询模式没有公网地址：直接把（带 token 的）媒体 URL 交给 Telegram 下载。
+  if (!origin) return url.href;
   const expires = Math.floor(Date.now() / 1000) + 15 * 60;
   const payload = `${expires}\n${url.href}`;
   const proxy = new URL("/media", origin);

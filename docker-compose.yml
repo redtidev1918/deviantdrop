@@ -1,0 +1,13 @@
+# DeviantDrop 服务器部署（compose）
+# 国内服务器经系统 clash 出口时用 network_mode: host 直接复用 127.0.0.1:7890。
+# 用法：
+#   cp .env.example .env   # 填入 BOT_TOKEN/WEBHOOK_SECRET/CLIENT_ID/CLIENT_SECRET
+#   docker compose up -d --build
+services:
+  deviantdrop:
+    build: .
+    image: deviantdrop:local
+    network_mode: host
+    restart: unless-stopped
+    env_file:
+      - .env
