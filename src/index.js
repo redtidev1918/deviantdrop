@@ -590,10 +590,12 @@ async function getOfficialToken(env) {
   if (cached?.token) return cached.token;
   const endpoint = new URL(DA_TOKEN_URL);
   if (env.DA_REFRESH_TOKEN) {
-    // 用户 OAuth：refresh token 持久化，access 自动续期（登录一次，长期有效）
+    // 用户 OAuth：refresh token 持久化 + 轮换，access 自动续期（登录一次，长期有效）
+    const rotated = await cacheGet("api", "refresh");
+    const refreshToken = rotated?.token || env.DA_REFRESH_TOKEN;
     endpoint.search = new URLSearchParams({
       grant_type: "refresh_token",
-      refresh_token: env.DA_REFRESH_TOKEN,
+      refresh_token: refreshToken,
       client_id: env.CLIENT_ID,
       client_secret: env.CLIENT_SECRET,
     });
@@ -616,6 +618,10 @@ async function getOfficialToken(env) {
   }
   const ttl = Math.max(120, Number(data.expires_in ?? 3600) - 60);
   await cacheSet("api", "token", { token: data.access_token }, ttl);
+  // refresh token 若被轮换，持久化到缓存卷，后续刷新用新值
+  if (data.refresh_token) {
+    await cacheSet("api", "refresh", { token: data.refresh_token }, 30 * 24 * 3600);
+  }
   return data.access_token;
 }
 

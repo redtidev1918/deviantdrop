@@ -9,7 +9,7 @@
 // 里加入：http://127.0.0.1:8787/callback （本地回环地址；这一步只需一次）。
 import { createServer } from "node:http";
 import { createHash, randomBytes } from "node:crypto";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { writeFileSync } from "node:fs";
 
@@ -45,7 +45,14 @@ authUrl.search = new URLSearchParams({
   code_challenge_method: "S256",
 });
 
-console.log("\n在浏览器打开并完成授权：\n\n  " + authUrl.toString() + "\n");
+console.log("\n授权地址：\n\n  " + authUrl.toString() + "\n");
+// 自动打开浏览器（macOS/Windows/Linux 通用降级）
+try {
+  if (process.platform === "darwin") spawn("open", [authUrl.toString()], { detached: true, stdio: "ignore" }).unref();
+  else if (process.platform === "win32") spawn("cmd", ["/c", "start", authUrl.toString()], { detached: true, stdio: "ignore" }).unref();
+  else spawn("xdg-open", [authUrl.toString()], { detached: true, stdio: "ignore" }).unref();
+  console.log("（已尝试自动打开浏览器）\n");
+} catch { /* 打开失败就手动复制上面的链接 */ }
 
 const code = await new Promise((resolve, reject) => {
   const server = createServer((req, res) => {

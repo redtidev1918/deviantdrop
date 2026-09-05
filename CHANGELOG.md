@@ -10,6 +10,14 @@
 
 ---
 
+## [Unreleased]
+
+### 自动化
+- 新增 CI：每次推送/PR 自动跑测试（npm test）。
+- 新增 Release 自动化：打 `v*` tag 即自动测试并从 CHANGELOG 生成 GitHub Release。
+- 本地一键脚本：`npm run login`（OAuth 登录并自动写入 VPS + 重启）、`npm run deploy:vps`、`npm run logs`。
+- OAuth refresh token 支持轮换持久化；登录脚本自动打开浏览器。
+
 ## [1.3.2] - 2026-09-06
 
 ### 修复

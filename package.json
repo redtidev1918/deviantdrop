@@ -26,7 +26,10 @@
     "start": "node src/main.js",
     "detect": "node scripts/detect-da.mjs",
     "test": "node --test",
-    "check": "npm test && wrangler deploy --dry-run --outdir dist"
+    "check": "npm test && wrangler deploy --dry-run --outdir dist",
+    "login": "node scripts/da-login.mjs",
+    "deploy:vps": "bash -c 'SERVER=\"${SERVER:-root@114.55.249.249}\"; git push origin main && ssh \"$SERVER\" \"cd /opt/deviantdrop && git pull -q && docker compose up -d --build\"'",
+    "logs": "ssh \"${SERVER:-root@114.55.249.249}\" \"docker logs -f deviantdrop-deviantdrop-1\""
   },
   "devDependencies": {
     "wrangler": "^4.129.0"
