@@ -60,6 +60,11 @@ test("selects the highest-quality DeviantArt video", () => {
     extractDeviantArtMedia({ title: "Image", media: { baseUri: "https://images.wixmp.com/work.jpg" } }).kind,
     "photo",
   );
+  // 成熟内容：明确报错而不是返回打码/400 的地址
+  assert.throws(
+    () => extractDeviantArtMedia({ title: "NSFW", isMature: true, media: { baseUri: "https://images.wixmp.com/x.jpg" } }),
+    /需登录查看的成熟内容/,
+  );
 });
 
 test("resolves two links with one DeviantArt session and serves the signed proxy", async (t) => {

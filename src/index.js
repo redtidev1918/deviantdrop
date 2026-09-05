@@ -728,6 +728,11 @@ export function extractDeviantArtMedia(deviation) {
   if (!deviation || typeof deviation !== "object") {
     throw new Error("DeviantArt 没有返回作品数据");
   }
+  // 成熟内容对匿名访问只提供重度打码的 fullview（fetch 会 400/打码），无法拿原图：
+  // 直接给用户可理解的说明，而不是一个谜之 400。
+  if (deviation.isMature === true || deviation.is_mature === true) {
+    throw new Error("该作品是需登录查看的成熟内容，匿名无法获取原图（只能看到打码预览）");
+  }
   const media = deviation.media || {};
   const types = Array.isArray(media.types) ? media.types : [];
   const videos = types
