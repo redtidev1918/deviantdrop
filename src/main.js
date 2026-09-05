@@ -14,14 +14,32 @@ import { createServer } from "node:http";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
-import { ProxyAgent, setGlobalDispatcher } from "undici";
+import { Agent, ProxyAgent, fetch as undiciFetch } from "undici";
 import worker, { handleUpdate } from "./index.js";
 
 // —— 代理：国内服务器经 clash 等出口访问被墙的 Telegram/DeviantArt ——
 const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || "";
+const directAgent = new Agent();
 if (proxyUrl) {
-  setGlobalDispatcher(new ProxyAgent(proxyUrl));
-  console.log(`outbound proxy: ${proxyUrl}`);
+  // 媒体 CDN（wixmp/deviantart.net）国内可直连且更稳：不走机场出口；
+  // DA 页面 / 官方 API / Telegram / archive 仍走代理。
+  const proxyAgent = new ProxyAgent(proxyUrl);
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    let url;
+    try {
+      url = new URL(typeof input === "string" ? input : input?.url);
+    } catch {
+      return originalFetch(input, init);
+    }
+    const host = url.hostname.toLowerCase();
+    const mediaDirect =
+      host.endsWith(".wixmp.com") ||
+      host.endsWith(".deviantart.net") ||
+      host.endsWith(".wixstatic.com");
+    return undiciFetch(input, { ...(init || {}), dispatcher: mediaDirect ? directAgent : proxyAgent });
+  };
+  console.log(`outbound proxy: ${proxyUrl} (媒体直连)`);
 }
 
 // —— 进程内 Cache API（Cloudflare 语义的轻量实现）：去重/限流在单机同样生效 ——
