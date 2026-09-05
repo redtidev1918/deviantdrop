@@ -599,27 +599,60 @@ async function uploadMedia(env, kind, mediaUrl, caption, message, onStatus = nul
       }
     }
   }
-  const bytes = concatBytes(chunks);
+  let bytes = concatBytes(chunks);
   if (onStatus) onStatus("正在发送…");
-  const extension = guessExtension(mediaUrl, kind === "photo" ? "document" : kind);
+  let extension = guessExtension(mediaUrl, kind);
+  let sendAs = kind;
+  let captionText = caption;
+  // 照片超过阈值：优先压缩成可内嵌预览的照片发（Telegram 显示为图片）；压缩不可用才转文档
+  if (kind === "photo" && bytes.length > PHOTO_MAX_BYTES) {
+    const compressed = await compressPhoto(bytes);
+    if (compressed) {
+      bytes = compressed;
+      extension = "jpg";
+      captionText = `${caption}（原图超过 10MB，已压缩发送）`;
+      if (onStatus) onStatus("原图较大，正在压缩…");
+    } else {
+      sendAs = "document";
+    }
+  }
   const makeForm = (field) => {
     const form = new FormData();
     form.set("chat_id", String(message.chat.id));
-    form.set("caption", caption);
+    form.set("caption", captionText);
     form.set("reply_parameters", JSON.stringify({ message_id: message.message_id }));
     form.set(field, new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `${field}.${extension}`);
     return form;
   };
-  const [method, field] = MEDIA_FIELDS[kind];
+  const [method, field] = MEDIA_FIELDS[sendAs];
   try {
-    // 照片超过阈值：Telegram 不收 10MiB 以上的照片，直接按文档发
-    const asDocument = kind === "photo" && bytes.length > PHOTO_MAX_BYTES;
-    return await telegramForm(env, asDocument ? MEDIA_FIELDS.document[0] : method, makeForm(asDocument ? "document" : field));
+    return await telegramForm(env, method, makeForm(field));
   } catch (error) {
+    // 照片（含压缩后）仍被拒时再按文档试一次
     if (kind === "photo" && isTooBigError(error)) {
       return telegramForm(env, MEDIA_FIELDS.document[0], makeForm("document"));
     }
     throw error;
+  }
+}
+
+// 用 sharp 把超大图片压到 Telegram 照片上限内（JPEG，白底摊平透明、质量阶梯下降）。
+async function compressPhoto(bytes) {
+  try {
+    const sharp = (await import("sharp")).default;
+    const meta = await sharp(bytes, { failOn: "none" }).metadata();
+    if (!meta.width || !meta.height) return null;
+    for (const quality of [85, 75, 65, 55, 45]) {
+      const out = await sharp(bytes, { failOn: "none" })
+        .rotate()
+        .flatten({ background: "#ffffff" })
+        .jpeg({ quality, progressive: true })
+        .toBuffer();
+      if (out.length <= PHOTO_MAX_BYTES) return out;
+    }
+    return null;
+  } catch {
+    return null; // 压缩不可用（缺依赖/不支持格式）→ 走文档兜底
   }
 }
 
