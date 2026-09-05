@@ -317,17 +317,17 @@ async function sendDeviantArt(url, message, env, origin, sessionMemo = {}, onSta
   }
   try {
     const media = await resolveWebMedia(url, env, origin, sessionMemo);
-    const items = [{ kind: media.kind, url: media.url }, ...(media.extras || [])];
+    const items = [{ kind: media.kind, url: media.url, display: media.display }, ...(media.extras || [])];
     // 多文件作品：主图 + 附加图合并成一条 Telegram 相册（≤10、仅 photo/video 时）；
     // 否则退回单图发送（此时记得 file_id 供后续去重）
     if (items.length > 1 && items.length <= 10 && items.every((it) => it.kind === "photo" || it.kind === "video")) {
       const albumResults = await sendAlbum(items, `${media.title}\n${url.href}`, message, env, !origin, onStatus);
       await rememberAlbumFileIds(target.id, media.title, albumResults, env);
     } else {
-      const sent = await sendOne(media.kind, media.url, `${media.title}\n${url.href}`, message, env, !origin, onStatus);
+      const sent = await sendOne(media.kind, media.url, `${media.title}\n${url.href}`, message, env, !origin, onStatus, media.display);
       await rememberFileId(target.id, media.kind, media.title, sent, env);
       for (const extra of media.extras || []) {
-        await sendOne(extra.kind, extra.url, `（${media.title} 的更多画面）`, message, env, !origin, onStatus);
+        await sendOne(extra.kind, extra.url, `（${media.title} 的更多画面）`, message, env, !origin, onStatus, extra.display);
       }
     }
     return;
@@ -367,6 +367,7 @@ async function resolveWebMedia(url, env, origin, sessionMemo) {
       const deviation = data.deviation;
       const allowMature = Boolean(env.DA_COOKIES);
       const item = extractDeviantArtMedia(deviation, allowMature);
+      const display = displayMediaUrl(deviation.media || {});
       const extras = [];
       // 多文件作品：其余画面在 init 响应的 deviation.extended.additionalMedia 里
       // （daviewer/dakit 同源结论），每项嵌套 Wix 媒体描述符；解析失败仅发主图。
@@ -382,6 +383,7 @@ async function resolveWebMedia(url, env, origin, sessionMemo) {
                 extras.push({
                   kind: extensionKind(extraUrl) || "photo",
                   url: await createProxyUrl(origin, extraUrl, env.WEBHOOK_SECRET),
+                  display: displayMediaUrl(media) || null,
                 });
               }
             }
@@ -393,6 +395,7 @@ async function resolveWebMedia(url, env, origin, sessionMemo) {
       return {
         kind: item.kind,
         url: await createProxyUrl(origin, item.url, env.WEBHOOK_SECRET),
+        display,
         title: item.title,
         extras,
       };
@@ -426,6 +429,21 @@ function pickMultimediaUrl(media) {
   return null;
 }
 
+
+// 原图不可得（如免费账号原图额度用尽）时的最高清展示图：preview 变体优先，
+// 其次最大的宽缩略图；fullview 变体（mature 打码/400）不用。
+function displayMediaUrl(media) {
+  if (!media || typeof media !== "object") return null;
+  const types = Array.isArray(media.types) ? media.types : [];
+  const prefer = ["preview", "414W", "375W", "400T", "350T", "300W"];
+  for (const name of prefer) {
+    const type = types.find((item) => item?.t === name);
+    if (!type) continue;
+    if (type.b) return appendToken(type.b, media.token);
+    if (type.c) return buildMediaUrl(media, type.c);
+  }
+  return null;
+}
 
 // —— 官方 OAuth API 解析路径（数字 id → archive.org 快照里的 UUID → deviation 取媒体）——
 
@@ -580,13 +598,13 @@ async function pickOfficialMediaUrl(env, deviation, uuid) {
   return preview || null;
 }
 
-async function sendOne(kind, mediaUrl, caption, message, env, upload = false, onStatus = null) {
+async function sendOne(kind, mediaUrl, caption, message, env, upload = false, onStatus = null, fallbackUrl = null) {
   const fields = MEDIA_FIELDS[kind];
   if (!fields) throw new Error("不支持的媒体类型");
   const text = String(caption).slice(0, 1024);
   if (upload) {
     // 轮询模式：Telegram 服务器拉不动 wixmp（需 Referer/UA），由 Bot 先下载再上传。
-    return uploadMedia(env, kind, mediaUrl, text, message, onStatus);
+    return uploadMedia(env, kind, mediaUrl, text, message, onStatus, fallbackUrl);
   }
   try {
     return await telegram(env, fields[0], {
@@ -632,15 +650,30 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null) 
   const entries = [];
   const docFalls = [];
   let compressedAny = false;
+  let usedFallbackAny = false;
   for (let i = 0; i < items.length; i += 1) {
     const indexLabel = `第 ${i + 1}/${items.length} 张`;
-    const response = await guardedFetch(items[i].url, {
+    let response = await guardedFetch(items[i].url, {
       headers: { ...DA_HEADERS, Referer: DEVIANTART },
       signal: AbortSignal.timeout(180_000),
     }, "媒体下载");
+    let itemFallback = false;
     if (!response.ok) {
       response.body?.cancel();
-      throw quotaOrMediaError(response.status);
+      if ((response.status === 403 || response.status === 429) && items[i].display && items[i].display !== items[i].url) {
+        const fallback = await guardedFetch(items[i].display, {
+          headers: { ...DA_HEADERS, Referer: DEVIANTART },
+          signal: AbortSignal.timeout(120_000),
+        }, "展示图下载");
+        if (!fallback.ok) {
+          fallback.body?.cancel();
+          throw quotaOrMediaError(response.status);
+        }
+        response = fallback;
+        itemFallback = true;
+      } else {
+        throw quotaOrMediaError(response.status);
+      }
     }
     const totalBytes = Number(response.headers.get("Content-Length")) || 0;
     const fileChunks = [];
@@ -661,7 +694,11 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null) 
       }
     }
     let bytes = concatBytes(fileChunks);
-    let extension = guessExtension(items[i].url, items[i].kind);
+    let extension = guessExtension(itemFallback ? items[i].display : items[i].url, items[i].kind);
+    if (itemFallback) {
+      extension = "jpg";
+      usedFallbackAny = true;
+    }
     if (items[i].kind === "photo" && bytes.length > PHOTO_MAX_BYTES) {
       const compressed = await compressPhoto(bytes);
       if (compressed) {
@@ -676,8 +713,10 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null) 
     }
     entries.push({ bytes, extension, kind: items[i].kind });
   }
-  const note = compressedAny ? "\n（部分原图超过 10MB，已压缩发送）" : "";
-  const fullCaption = `${firstCaption}${note}`.slice(0, 1024);
+  const notes = [];
+  if (compressedAny) notes.push("部分原图超过 10MB，已压缩发送");
+  if (usedFallbackAny) notes.push("部分原图额度受限，已用最高清展示图替代");
+  const fullCaption = (notes.length === 0 ? firstCaption : `${firstCaption}（${notes.join("；")}）`).slice(0, 1024);
   const results = [];
   const mediaForm = (field) => {
     const form = new FormData();
@@ -778,14 +817,28 @@ function detectFile(result) {
 
 // 下载媒体并作为 multipart 上传给 Telegram（带 DA 所需 Referer/UA，规避 Telegram 拉不动）。
 // 照片字节超过 Telegram 上限时提前改发文档（TelePost 同款阈值策略），失败也会兜底再发一次文档。
-async function uploadMedia(env, kind, mediaUrl, caption, message, onStatus = null) {
-  const response = await guardedFetch(mediaUrl, {
+async function uploadMedia(env, kind, mediaUrl, caption, message, onStatus = null, fallbackUrl = null) {
+  let response = await guardedFetch(mediaUrl, {
     headers: { ...DA_HEADERS, Referer: DEVIANTART },
     signal: AbortSignal.timeout(180_000),
   }, "媒体下载");
+  let usedFallback = false;
   if (!response.ok) {
     response.body?.cancel();
-    throw quotaOrMediaError(response.status);
+    if ((response.status === 403 || response.status === 429) && fallbackUrl && fallbackUrl !== mediaUrl) {
+      const fallback = await guardedFetch(fallbackUrl, {
+        headers: { ...DA_HEADERS, Referer: DEVIANTART },
+        signal: AbortSignal.timeout(120_000),
+      }, "展示图下载");
+      if (!fallback.ok) {
+        fallback.body?.cancel();
+        throw quotaOrMediaError(response.status);
+      }
+      response = fallback;
+      usedFallback = true;
+    } else {
+      throw quotaOrMediaError(response.status);
+    }
   }
   // 流式读取以报告下载进度（Telegram Bot API 没有上传进度事件，进度只能反映“下载”阶段）
   const totalBytes = Number(response.headers.get("Content-Length")) || 0;
@@ -822,6 +875,10 @@ async function uploadMedia(env, kind, mediaUrl, caption, message, onStatus = nul
     } else {
       sendAs = "document";
     }
+  }
+  if (usedFallback) {
+    extension = "jpg";
+    captionText = `${captionText}（原图额度受限，已用最高清展示图替代）`;
   }
   const makeForm = (field) => {
     const form = new FormData();
