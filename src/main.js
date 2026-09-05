@@ -12,7 +12,8 @@
 //   - webhook 本机起 HTTP 服务，需自行提供公网 HTTPS 反代并注册 setWebhook。
 import { createServer } from "node:http";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
+import { tmpdir } from "node:os";
 import { ProxyAgent, setGlobalDispatcher } from "undici";
 import worker, { handleUpdate } from "./index.js";
 
@@ -26,7 +27,8 @@ if (proxyUrl) {
 // —— 进程内 Cache API（Cloudflare 语义的轻量实现）：去重/限流在单机同样生效 ——
 // 并持久化到磁盘，重启后 file_id 去重、限流窗口等仍保留。
 if (!globalThis.caches) {
-  const CACHE_FILE = process.env.CACHE_FILE || "/data/deviantdrop-cache.json";
+  const CACHE_FILE =
+    process.env.CACHE_FILE || join(tmpdir(), "deviantdrop-cache.json");
   const entries = new Map();
   try {
     const saved = JSON.parse(readFileSync(CACHE_FILE, "utf8"));
@@ -146,6 +148,11 @@ async function pollUpdates(env) {
         continue;
       }
       for (const update of data.result || []) {
+        const msg = update.message;
+        console.log(
+          `[upd] id=${update.update_id} chat=${msg?.chat?.type ?? "?"}(${msg?.chat?.id ?? "?"}) ` +
+          `from=${msg?.from?.id ?? "?"} text=${(msg?.text ?? msg?.caption ?? "").slice(0, 40).replace(/\n/g, " ") || "<no-text>"}`,
+        );
         try {
           await handleUpdate(update, env, null);
         } catch (error) {
