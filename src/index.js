@@ -155,11 +155,15 @@ async function handleMessage(message, env, origin) {
   // “处理中”临时状态提示：阶段化（获取信息 → 下载进度% → 发送中），完成后自动删除。
   let statusId = null;
   let statusLastEdit = 0;
+  let statusLastText = "";
   const statusShow = async (text) => {
     if (!statusId) return;
     const now = Date.now();
-    if (now - statusLastEdit < 900) return; // Telegram 编辑有频率限制，节流
+    const elapsed = now - statusLastEdit;
+    // 同一句话才严格节流；阶段切换（文字变了）允许 300ms 后即刷新，避免“发送中”被吞
+    if (text === statusLastText ? elapsed < 900 : elapsed < 300) return;
     statusLastEdit = now;
+    statusLastText = text;
     try {
       await telegram(env, "editMessageText", { chat_id: message.chat.id, message_id: statusId, text });
     } catch {
@@ -303,6 +307,10 @@ async function sendDeviantArt(url, message, env, origin, sessionMemo = {}, onSta
   const target = parseDeviantArtTarget(url);
   // 媒体级去重：同一作品首次发过后缓存 Telegram file_id，再发直接用 file_id（零下载）。
   const cached = await cacheGet("fid", `d:${target.id}`);
+  if (cached?.kind === "album" && Array.isArray(cached.files) && cached.files.length) {
+    await sendAlbumByFileIds(cached.files, `${cached.title}\n${url.href}`, message, env);
+    return;
+  }
   if (cached?.file_id) {
     await sendFileById(cached.kind, cached.file_id, `${cached.title}\n${url.href}`, message, env);
     return;
@@ -313,7 +321,8 @@ async function sendDeviantArt(url, message, env, origin, sessionMemo = {}, onSta
     // 多文件作品：主图 + 附加图合并成一条 Telegram 相册（≤10、仅 photo/video 时）；
     // 否则退回单图发送（此时记得 file_id 供后续去重）
     if (items.length > 1 && items.length <= 10 && items.every((it) => it.kind === "photo" || it.kind === "video")) {
-      await sendAlbum(items, `${media.title}\n${url.href}`, message, env, !origin, onStatus);
+      const albumResults = await sendAlbum(items, `${media.title}\n${url.href}`, message, env, !origin, onStatus);
+      await rememberAlbumFileIds(target.id, media.title, albumResults, env);
     } else {
       const sent = await sendOne(media.kind, media.url, `${media.title}\n${url.href}`, message, env, !origin, onStatus);
       await rememberFileId(target.id, media.kind, media.title, sent, env);
@@ -589,59 +598,128 @@ async function sendOne(kind, mediaUrl, caption, message, env, upload = false, on
 async function sendAlbum(items, caption, message, env, upload, onStatus = null) {
   const typeOf = { photo: "photo", video: "video", animation: "animation" };
   const firstCaption = String(caption).slice(0, 1024);
-  const isUpload = upload;
-  if (isUpload) {
-    const form = new FormData();
-    const mediaParts = [];
-    for (let i = 0; i < items.length; i += 1) {
-      const indexLabel = `第 ${i + 1}/${items.length} 张`;
-      const response = await guardedFetch(items[i].url, {
-        headers: { ...DA_HEADERS, Referer: DEVIANTART },
-        signal: AbortSignal.timeout(180_000),
-      }, "媒体下载");
-      if (!response.ok) {
-        response.body?.cancel();
-        throw new Error(`媒体下载失败（HTTP ${response.status}）`);
-      }
-      // 流式读取并报告每张的下载百分比
-      const totalBytes = Number(response.headers.get("Content-Length")) || 0;
-      const fileChunks = [];
-      let received = 0;
-      let lastPct = -1;
-      const reader = response.body.getReader();
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        fileChunks.push(value);
-        received += value.byteLength;
-        if (onStatus && totalBytes > 0) {
-          const pct = Math.floor((received / totalBytes) * 100);
-          if (pct % 5 === 0 && pct > lastPct) {
-            lastPct = pct;
-            onStatus(`正在下载 ${indexLabel} ${pct}%`);
-          }
+  if (!upload) {
+    const result = await telegram(env, "sendMediaGroup", {
+      chat_id: message.chat.id,
+      media: items.map((item, index) => ({
+        type: typeOf[item.kind] || "photo",
+        media: item.url,
+        ...(index === 0 ? { caption: firstCaption } : {}),
+      })),
+      reply_parameters: { message_id: message.message_id },
+    });
+    return Array.isArray(result) ? result : [result];
+  }
+
+  // 轮询（上传）模式：逐张下载（带进度）→ 超限照片压缩后再进相册 → 压缩失败降级为文档
+  const entries = [];
+  const docFalls = [];
+  let compressedAny = false;
+  for (let i = 0; i < items.length; i += 1) {
+    const indexLabel = `第 ${i + 1}/${items.length} 张`;
+    const response = await guardedFetch(items[i].url, {
+      headers: { ...DA_HEADERS, Referer: DEVIANTART },
+      signal: AbortSignal.timeout(180_000),
+    }, "媒体下载");
+    if (!response.ok) {
+      response.body?.cancel();
+      throw new Error(`媒体下载失败（HTTP ${response.status}）`);
+    }
+    const totalBytes = Number(response.headers.get("Content-Length")) || 0;
+    const fileChunks = [];
+    let received = 0;
+    let lastPct = -1;
+    const reader = response.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      fileChunks.push(value);
+      received += value.byteLength;
+      if (onStatus && totalBytes > 0) {
+        const pct = Math.floor((received / totalBytes) * 100);
+        if (pct % 5 === 0 && pct > lastPct) {
+          lastPct = pct;
+          onStatus(`正在下载 ${indexLabel} ${pct}%`);
         }
       }
-      const fileBytes = concatBytes(fileChunks);
-      const extension = guessExtension(items[i].url, "photo");
-      form.set(`file${i}`, new Blob([fileBytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `photo${i}.${extension}`);
-      mediaParts.push({
-        type: typeOf[items[i].kind] || "photo",
-        media: `attach://file${i}`,
-        ...(i === 0 ? { caption: firstCaption } : {}),
-      });
     }
-    form.set("chat_id", String(message.chat.id));
-    form.set("media", JSON.stringify(mediaParts));
-    form.set("reply_parameters", JSON.stringify({ message_id: message.message_id }));
-    if (onStatus) onStatus("正在发送相册…");
-    return telegramForm(env, "sendMediaGroup", form);
+    let bytes = concatBytes(fileChunks);
+    let extension = guessExtension(items[i].url, items[i].kind);
+    if (items[i].kind === "photo" && bytes.length > PHOTO_MAX_BYTES) {
+      const compressed = await compressPhoto(bytes);
+      if (compressed) {
+        bytes = compressed;
+        extension = "jpg";
+        compressedAny = true;
+        if (onStatus) onStatus(`正在压缩 ${indexLabel}…`);
+      } else {
+        docFalls.push({ url: items[i].url, bytes, extension });
+        continue;
+      }
+    }
+    entries.push({ bytes, extension, kind: items[i].kind });
   }
-  return telegram(env, "sendMediaGroup", {
+  const note = compressedAny ? "\n（部分原图超过 10MB，已压缩发送）" : "";
+  const fullCaption = `${firstCaption}${note}`.slice(0, 1024);
+  const results = [];
+  const mediaForm = (field) => {
+    const form = new FormData();
+    form.set("chat_id", String(message.chat.id));
+    form.set("reply_parameters", JSON.stringify({ message_id: message.message_id }));
+    return form;
+  };
+  if (entries.length >= 2) {
+    const form = mediaForm("media");
+    const parts = [];
+    for (let i = 0; i < entries.length; i += 1) {
+      const { bytes, extension, kind } = entries[i];
+      form.set(`file${i}`, new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `photo${i}.${extension}`);
+      parts.push({ type: typeOf[kind] || "photo", media: `attach://file${i}`, ...(i === 0 ? { caption: fullCaption } : {}) });
+    }
+    form.set("media", JSON.stringify(parts));
+    if (onStatus) onStatus("正在发送相册…");
+    const sent = await telegramForm(env, "sendMediaGroup", form);
+    results.push(...(Array.isArray(sent) ? sent : [sent]));
+  } else if (entries.length === 1) {
+    const { bytes, extension } = entries[0];
+    const form = mediaForm("photo");
+    form.set("caption", fullCaption);
+    form.set("photo", new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `photo0.${extension}`);
+    if (onStatus) onStatus("正在发送…");
+    results.push(await telegramForm(env, "sendPhoto", form));
+  }
+  for (const doc of docFalls) {
+    if (onStatus) onStatus("正在发送（超大原图以文件发送）…");
+    const form = mediaForm("document");
+    form.set("document", new Blob([doc.bytes], { type: "application/octet-stream" }), `original.${doc.extension}`);
+    results.push(await telegramForm(env, "sendDocument", form));
+  }
+  return results;
+}
+
+// 相册整组缓存：同一作品再次发送时直接用 file_id 组（零下载、零重传）。
+async function rememberAlbumFileIds(id, title, results, env) {
+  if (!Array.isArray(results) || results.length === 0) return;
+  const files = [];
+  for (const result of results) {
+    const detected = detectFile(result);
+    if (detected?.file_id) files.push(detected);
+  }
+  // 相册只支持 photo/video；若混入了降级发送的 document（压缩失败），整组不缓存，
+  // 避免用文档 file_id 按相册回放出错。
+  if (files.length === results.length && files.every((f) => f.kind === "photo" || f.kind === "video")) {
+    await cacheSet("fid", `d:${id}`, { kind: "album", title, files }, 30 * 24 * 3600);
+  }
+}
+
+async function sendAlbumByFileIds(files, caption, message, env) {
+  const typeOf = { photo: "photo", video: "video", animation: "animation" };
+  const firstCaption = String(caption).slice(0, 1024);
+  await telegram(env, "sendMediaGroup", {
     chat_id: message.chat.id,
-    media: items.map((item, index) => ({
-      type: typeOf[item.kind] || "photo",
-      media: item.url,
+    media: files.map((file, index) => ({
+      type: typeOf[file.kind] || "photo",
+      media: file.file_id,
       ...(index === 0 ? { caption: firstCaption } : {}),
     })),
     reply_parameters: { message_id: message.message_id },
