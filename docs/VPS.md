@@ -82,6 +82,31 @@ curl -fsS "https://api.telegram.org/bot${BOT_TOKEN}/setMyCommands" \
   -d '[{"command":"start","description":"开始使用"},{"command":"help","description":"查看用法"},{"command":"about","description":"项目介绍与源码仓库"}]'
 ```
 
+## 4.5 下载成熟 / NSFW 内容（需登录）
+
+匿名访问只能拿到 DA 打码预览，原图需要登录会话。做法：把你在浏览器里的
+DeviantArt 登录 Cookie 交给 Bot。
+
+1. 浏览器登录 [deviantart.com](https://www.deviantart.com)，并在 **DA 设置 → General →
+   Mature Content** 勾选「Show DeviantArt Mature Content」。
+2. 打开浏览器开发者工具（F12）→ Application/Storage → Cookies → `www.deviantart.com`，
+   复制 `auth`、`auth_secure`、`userinfo` 三项，拼成一行：
+
+   ```
+   auth=xxx; auth_secure=xxx; userinfo=xxx
+   ```
+
+3. 写进 `.env`：
+
+   ```dotenv
+   DA_COOKIES=auth=xxx; auth_secure=xxx; userinfo=xxx
+   ```
+
+4. 重启：`docker compose up -d --build`（或重启 node 进程）。
+
+> 注意：Cookie 等同账号登录态，别提交到 git（`.env` 已被 .gitignore 排除）。
+> 好友限定/仅订阅可见的作品仍可能拿不到；公开但标了 Mature 的作品，登录后即可下原图。
+
 ## 5. 验证与排错
 
 ```bash

@@ -256,12 +256,14 @@ function cacheUrl(namespace, key) {
 }
 
 // DA 匿名 session（CSRF + cookie）与聊天无关，跨消息、跨聊天复用可显著减少
-// 对 DeviantArt 的请求总量，降低触发自适应限流的概率。
-async function getDeviantArtSession() {
-  const cached = await cacheGet("da", "session");
+// 对 DeviantArt 的请求总量，降低触发自适应限流的概率。配置 DA_COOKIES 时
+// 注入登录会话（用于成熟内容），并单独缓存避免与匿名 csrf 串用。
+async function getDeviantArtSession(env) {
+  const key = env.DA_COOKIES ? "session:auth" : "session";
+  const cached = await cacheGet("da", key);
   if (cached?.csrf) return cached;
-  const session = await createDeviantArtSession();
-  await cacheSet("da", "session", session, SESSION_TTL_SECONDS);
+  const session = await createDeviantArtSession(env);
+  await cacheSet("da", key, session, SESSION_TTL_SECONDS);
   return session;
 }
 
@@ -278,13 +280,15 @@ async function takeLinkBudget(chatId, count) {
   return allowed;
 }
 
-async function createDeviantArtSession() {
-  const home = await fetchDeviantArt(DEVIANTART, { headers: { Accept: "text/html", ...DA_HEADERS } });
+async function createDeviantArtSession(env) {
+  const headers = { Accept: "text/html", ...DA_HEADERS };
+  if (env.DA_COOKIES) headers.Cookie = env.DA_COOKIES;
+  const home = await fetchDeviantArt(DEVIANTART, { headers });
   await throwForDeviantArtStatus(home);
   const html = await home.text();
   const csrf = html.match(/window\.__CSRF_TOKEN__ = '([^']+)'/)?.[1];
   if (!csrf) throw new Error("DeviantArt 页面结构可能已变化，无法读取 CSRF token");
-  return { csrf, cookies: getCookies(home.headers) };
+  return { csrf, cookies: env.DA_COOKIES || getCookies(home.headers) };
 }
 
 // 解析并发送单个作品。双通道级联：
@@ -316,7 +320,7 @@ async function sendDeviantArt(url, message, env, origin, sessionMemo = {}) {
 }
 
 async function resolveWebMedia(url, env, origin, sessionMemo) {
-  if (!sessionMemo.session) sessionMemo.session = await getDeviantArtSession();
+  if (!sessionMemo.session) sessionMemo.session = await getDeviantArtSession(env);
   const session = sessionMemo.session;
   const target = parseDeviantArtTarget(url);
   const endpoint = new URL("/_puppy/dadeviation/init", DEVIANTART);
@@ -333,7 +337,7 @@ async function resolveWebMedia(url, env, origin, sessionMemo) {
     ...DA_HEADERS,
     ...(session.cookies ? { Cookie: session.cookies } : {}),
   });
-  const item = extractDeviantArtMedia(data.deviation);
+  const item = extractDeviantArtMedia(data.deviation, Boolean(env.DA_COOKIES));
   return {
     kind: item.kind,
     url: await createProxyUrl(origin, item.url, env.WEBHOOK_SECRET),
@@ -724,13 +728,13 @@ function base36ToBigInt(value) {
   return result;
 }
 
-export function extractDeviantArtMedia(deviation) {
+export function extractDeviantArtMedia(deviation, allowMature = false) {
   if (!deviation || typeof deviation !== "object") {
     throw new Error("DeviantArt 没有返回作品数据");
   }
   // 成熟内容对匿名访问只提供重度打码的 fullview（fetch 会 400/打码），无法拿原图：
-  // 直接给用户可理解的说明，而不是一个谜之 400。
-  if (deviation.isMature === true || deviation.is_mature === true) {
+  // 直接给用户可理解的说明，而不是一个谜之 400。带登录 Cookie（DA_COOKIES）时才放行。
+  if ((deviation.isMature === true || deviation.is_mature === true) && !allowMature) {
     throw new Error("该作品是需登录查看的成熟内容，匿名无法获取原图（只能看到打码预览）");
   }
   const media = deviation.media || {};
