@@ -588,3 +588,45 @@ test("falls back to document for oversized photos and reuses its file_id", async
   assert.equal(documents[1].body.document, "DOC_1");
   assert.equal(calls.filter((c) => c.method === "sendPhoto").length, 1); // 第一次尝试照片被拒
 });
+
+test("sends additional media of a multimedia deviation", async (t) => {
+  const originalFetch = globalThis.fetch;
+  let initCalls = 0;
+  const sends = [];
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url === "https://www.deviantart.com/") {
+      return new Response("window.__CSRF_TOKEN__ = 'csrf'");
+    }
+    if (url.includes("/_puppy/dadeviation/init")) {
+      initCalls += 1;
+      return Response.json({
+        deviation: {
+          title: "组图",
+          isMultiMedia: true,
+          media: { baseUri: "https://images.wixmp.com/main.jpg", token: "t1" },
+        },
+      });
+    }
+    if (url.startsWith("https://www.deviantart.com/artist/art/group-999999999")) {
+      return new Response('{"page":1,"additionalMedia":[{"fileId":2,"media":{"baseUri":"https://images.wixmp.com/extra2.jpg","token":"t2"}},{"fileId":3,"media":{"baseUri":"https://images.wixmp.com/extra3.png","token":"t3"}}]}');
+    }
+    if (url.includes("api.telegram.org")) {
+      sends.push({ url, body: JSON.parse(init.body) });
+      return Response.json({ ok: true, result: { message_id: 9 } });
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  t.after(installFakeCache());
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  const env = { BOT_TOKEN: "111:secret", WEBHOOK_SECRET: "secret" };
+  await postMessage(env, 701, {
+    from: { id: 42 }, chat: { id: 900, type: "private" }, message_id: 70,
+    text: "https://www.deviantart.com/artist/art/group-999999999",
+  });
+
+  const mediaCount = sends.filter((s) => /send(Photo|Video|Animation)$/.test(s.url)).length;
+  assert.equal(initCalls, 1);
+  assert.equal(mediaCount, 3); // 主图 + 2 张附加图
+});

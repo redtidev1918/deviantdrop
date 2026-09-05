@@ -311,6 +311,10 @@ async function sendDeviantArt(url, message, env, origin, sessionMemo = {}, onSta
     const media = await resolveWebMedia(url, env, origin, sessionMemo);
     const sent = await sendOne(media.kind, media.url, `${media.title}\n${url.href}`, message, env, !origin, onStatus);
     await rememberFileId(target.id, media.kind, media.title, sent, env);
+    // 多文件作品：其余画面逐张补发（Telegram 相册合并留待真实样例验证后再优化）
+    for (const extra of media.extras || []) {
+      await sendOne(extra.kind, extra.url, `（${media.title} 的更多画面）`, message, env, !origin, onStatus);
+    }
     return;
   } catch (error) {
     const text = error instanceof Error ? error.message : String(error);
@@ -345,11 +349,102 @@ async function resolveWebMedia(url, env, origin, sessionMemo) {
   const deviation = data.deviation;
   const allowMature = Boolean(env.DA_COOKIES);
   const item = extractDeviantArtMedia(deviation, allowMature);
+  const extras = [];
+  // 多文件作品（isMultiMedia）：作品页内嵌 additionalMedia 列表，这里把其余画面也取出来
+  if (deviation?.isMultiMedia === true) {
+    try {
+      const parsed = await multimediaExtras(url.href, session);
+      for (const media of parsed) {
+        extras.push({
+          kind: extensionKind(media.url) || "photo",
+          url: await createProxyUrl(origin, media.url, env.WEBHOOK_SECRET),
+        });
+      }
+    } catch (error) {
+      console.error("多图解析失败，仅发主图:", error instanceof Error ? error.message : String(error));
+    }
+  }
   return {
     kind: item.kind,
     url: await createProxyUrl(origin, item.url, env.WEBHOOK_SECRET),
     title: item.title,
+    extras,
   };
+}
+
+// 从作品页 HTML 解析 additionalMedia（DA 内嵌 JSON，引号带 \" 转义），
+// 解析不出就返回空数组（不影响主图发送）。
+async function multimediaExtras(pageUrl, session) {
+  const response = await guardedFetch(pageUrl, {
+    headers: {
+      Accept: "text/html",
+      ...DA_HEADERS,
+      ...(session.cookies ? { Cookie: session.cookies } : {}),
+    },
+    signal: AbortSignal.timeout(40_000),
+  }, "作品页");
+  if (!response.ok) {
+    response.body?.cancel();
+    return [];
+  }
+  const html = await response.text();
+  const list = extractBalancedArray(html, "additionalMedia");
+  if (!list) return [];
+  const urls = [];
+  for (const entry of list) {
+    if (urls.length >= 10) break;
+    const media = (entry && typeof entry === "object") ? (entry.media || entry) : null;
+    const url = pickMultimediaUrl(media);
+    if (url) urls.push({ url });
+  }
+  return urls;
+}
+
+function extractBalancedArray(html, key) {
+  const un = html.replaceAll('\\"', '"');
+  const keyAt = un.indexOf(`"${key}"`);
+  if (keyAt < 0) return null;
+  const open = un.indexOf("[", keyAt);
+  if (open < 0) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = open; i < un.length; i += 1) {
+    const ch = un[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === "[") depth += 1;
+    else if (ch === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        try {
+          return JSON.parse(un.slice(open, i + 1));
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+// 附加媒体的 URL 选择：与主媒体一致，优先 baseUri 原始文件，其次模板。
+function pickMultimediaUrl(media) {
+  if (!media || typeof media !== "object") return null;
+  if (extensionKind(media.baseUri || "")) return appendToken(media.baseUri, media.token);
+  const types = Array.isArray(media.types) ? media.types : [];
+  const full = types.find((item) => item?.t === "fullview");
+  if (full?.b) return appendToken(full.b, media.token);
+  if (full?.c) return buildMediaUrl(media, full.c);
+  const preview = types.find((item) => item?.t === "preview" && (item.c || item.b));
+  if (preview?.b) return appendToken(preview.b, media.token);
+  if (preview?.c) return buildMediaUrl(media, preview.c);
+  return null;
 }
 
 
