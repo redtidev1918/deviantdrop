@@ -733,6 +733,13 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null) 
       parts.push({ type: typeOf[kind] || "photo", media: `attach://file${i}`, ...(i === 0 ? { caption: fullCaption } : {}) });
     }
     form.set("media", JSON.stringify(parts));
+    console.error(
+      "[album] entries=%d mediaJson=%s files0=%d files1=%d",
+      entries.length,
+      String(form.get("media")).slice(0, 160),
+      form.getAll("file0").length,
+      form.getAll("file1").length,
+    );
     if (onStatus) onStatus("正在发送相册…");
     const sent = await telegramForm(env, "sendMediaGroup", form);
     results.push(...(Array.isArray(sent) ? sent : [sent]));
