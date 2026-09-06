@@ -991,6 +991,15 @@ async function compressPhoto(bytes) {
   }
 }
 
+// 计算 Telegram 限流后的退避秒数（参考 TelePost：等满 retry_after、指数退避、上限 60s）
+function telegramBackoffSeconds(status, result, attempt) {
+  const retryAfter = Number(result?.parameters?.retry_after);
+  if (status === 429 && retryAfter > 0) return Math.min(retryAfter, 60);
+  const description = String(result?.description || "");
+  if (/flood|retry after|too many/i.test(description)) return Math.min(2 ** attempt, 60);
+  return null;
+}
+
 async function telegramForm(env, method, formOrFactory) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     let form;
@@ -1078,7 +1087,7 @@ function guessExtension(mediaUrl, kind) {
 }
 
 async function telegram(env, method, body) {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
     let response;
     try {
       response = await fetch(`${TELEGRAM_API}/bot${env.BOT_TOKEN}/${method}`, {
@@ -1088,13 +1097,18 @@ async function telegram(env, method, body) {
         signal: AbortSignal.timeout(30_000),
       });
     } catch (error) {
-      if (attempt === 0) { await sleep(1000); continue; }
+      if (attempt < 3) {
+        console.error(`[tg] ${method} 网络错误，重试 ${attempt + 1}`);
+        await sleep(1000 * 2 ** attempt);
+        continue;
+      }
       throw new Error("Telegram 连接失败或超时，请稍后再试");
     }
     const result = await response.json().catch(() => null);
-    const retryAfter = Number(result?.parameters?.retry_after);
-    if (response.status === 429 && retryAfter > 0 && attempt === 0) {
-      await sleep(Math.min(retryAfter, 10) * 1000);
+    const backoff = telegramBackoffSeconds(response.status, result, attempt);
+    if (backoff !== null) {
+      console.error(`[tg] ${method} 限流，${backoff}s 后重试 ${attempt + 1}`);
+      await sleep(backoff * 1000);
       continue;
     }
     if (!response.ok || !result?.ok) {
