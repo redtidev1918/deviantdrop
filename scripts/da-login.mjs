@@ -20,12 +20,17 @@ const proxy=process.env.HTTPS_PROXY||process.env.HTTP_PROXY;
 if(proxy)globalThis.fetch=createProxyFetch(new ProxyAgent(proxy),new Agent());
 const store=new CredentialStore({path:join(process.env.AUTH_DIR||join(homedir(),'.config','deviantdrop','auth'),'deviantart.json')});
 let consumed=false;
+let done=false;
+// 结束进程：浏览器 keep-alive 连接会让 server.close() 挂起，这里给响应 flush 时间后
+// 断开所有连接并强制退出（成功 0 / 失败 1），保证外层脚本能继续（如 restart 容器）。
+const finish=(code)=>{ if(done)return; done=true; clearTimeout(timeout);
+  setTimeout(()=>{ try{server.closeAllConnections?.();}catch{} server.close(); process.exit(code); },300); };
 const server=createServer(async(req,res)=>{
   const query=new URL(req.url,redirectUri);
   // 根路径 302 到 DA 授权页：浏览器打开 http://127.0.0.1:<port> 即可，无需复制长 URL。
   if(query.pathname==='/'){res.writeHead(302,{Location:url.href}).end();return;}
   if(query.pathname!=='/callback'){res.writeHead(404).end();return;}
-  if(consumed||query.searchParams.get('state')!==state){res.writeHead(400).end('Invalid state');return;}
+  if(consumed||query.searchParams.get('state')!==state){res.writeHead(400).end('Invalid state');finish(1);return;}
   consumed=true;
   try{
     const code=query.searchParams.get('code');
@@ -38,10 +43,10 @@ const server=createServer(async(req,res)=>{
     store.save(data.refresh_token);
     res.writeHead(200,{'Content-Type':'text/plain; charset=utf-8','Cache-Control':'no-store'}).end('DeviantArt 登录成功，可以关闭本页。');
     console.log(`凭据已保存到 ${store.path}`);
-  }catch{res.writeHead(500).end('Login failed');}
-  finally{server.close();clearTimeout(timeout);}
+    finish(0);
+  }catch{res.writeHead(500).end('Login failed');console.error('登录失败');finish(1);}
 });
-const timeout=setTimeout(()=>{server.close();process.exitCode=1;},10*60*1000);
+const timeout=setTimeout(()=>{console.error('登录超时');finish(1);},10*60*1000);
 server.listen(port,'127.0.0.1',()=>{
   console.log(`登录服务已启动（10 分钟内有效）。`);
   console.log(`浏览器打开： http://127.0.0.1:${port}`);
