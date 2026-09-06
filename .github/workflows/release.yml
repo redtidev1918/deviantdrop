@@ -24,7 +24,7 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           awk "/^## \[${VERSION}\]/{flag=1; next} /^## \[/{if (flag) exit} flag" CHANGELOG.md > release_notes.md
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: DeviantDrop ${{ github.ref_name }}
           body_path: release_notes.md
