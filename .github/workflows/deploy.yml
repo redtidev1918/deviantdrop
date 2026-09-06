@@ -3,6 +3,7 @@ name: Deploy
 # 推送即部署：main 上有代码/配置变更时，SSH 到 VPS pull + 重建容器。
 # 需要仓库 Secrets：VPS_HOST / VPS_USER / VPS_SSH_KEY（见 docs/VPS.md）。
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
