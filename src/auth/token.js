@@ -18,7 +18,7 @@ export async function getOfficialToken(env) {
   try { return await state.pending; } finally { state.pending = null; }
 }
 
-async function refresh(env, state) {
+async function refresh(env, state, attempt = 0) {
   const store = env.credentialStore;
   const oldToken = store ? store.getRefreshToken() : (state.invalid ? null : state.refreshToken || await env.loadRefreshToken?.() || env.DA_REFRESH_TOKEN);
   const body = new URLSearchParams({ client_id: env.CLIENT_ID || '', grant_type: oldToken ? 'refresh_token' : 'client_credentials' });
@@ -39,8 +39,18 @@ async function refresh(env, state) {
   if (!response.ok || !data?.access_token) {
     const invalid = /invalid[ _]grant|refresh[ _]token.*invalid/i.test(`${data?.error || ''} ${data?.error_description || ''}`);
     if (oldToken && invalid) {
+      if (store) {
+        // compare-and-clear：文件里若已是别的实例轮换后的新 token，不要清空它——
+        // 重读磁盘并用新 token 再试一次；真的还是同一个 token 才宣告失效。
+        const cleared = store.invalidate('refresh_token_invalid', oldToken);
+        if (!cleared) {
+          store.reload();
+          state.token = null; state.refreshToken = null; state.invalid = false;
+          if (attempt >= 2) { state.invalid = true; throw new AuthRevokedError('凭据持续被外部更新，请重新登录'); }
+          return refresh(env, state, attempt + 1);
+        }
+      }
       state.invalid = true; state.token = null; state.refreshToken = null;
-      store?.invalidate();
       await env.clearRefreshToken?.();
       await env.authNotifier?.notifyInvalid('refresh token invalid');
       throw new AuthRevokedError();

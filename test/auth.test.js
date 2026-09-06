@@ -108,3 +108,24 @@ test("publicError：剥离 secret 后保留可读原文，不再笼统隐藏英�
   assert.doesNotMatch(publicError(new Error("refresh_token=deadbeef invalid")), /deadbeef/);
   assert.equal(publicError(new Error("")), "服务暂时无法完成该请求，请稍后重试。");
 });
+
+test("CredentialStore.invalidate CAS：文件已被外部轮换时不清空新 token", () => {
+  const path = tmpFile("cas.json");
+  const storeA = new CredentialStore({ path, seedEnvToken: "tok-1" });
+  assert.equal(storeA.getRefreshToken(), "tok-1");
+  // 另一实例（外部登录）把文件轮换为 tok-2
+  new CredentialStore({ path }).save("tok-2");
+  // A 仍持内存 tok-1，尝试用 tok-1 标记失效 → 应拒绝（文件已是 tok-2）
+  const cleared = storeA.invalidate("refresh_token_invalid", "tok-1");
+  assert.equal(cleared, false, "不应清掉已被轮换的新 token");
+  assert.equal(new CredentialStore({ path }).getRefreshToken(), "tok-2", "tok-2 必须仍在");
+  assert.equal(storeA.isInvalid(), false);
+  // 内存态重读磁盘后能看到 tok-2
+  storeA.reload();
+  assert.equal(storeA.getRefreshToken(), "tok-2");
+  // 真失效（文件 token 与尝试一致）才清空
+  const cleared2 = storeA.invalidate("refresh_token_invalid", "tok-2");
+  assert.equal(cleared2, true);
+  assert.equal(new CredentialStore({ path }).getRefreshToken(), null);
+  assert.equal(new CredentialStore({ path }).isInvalid(), true);
+});
