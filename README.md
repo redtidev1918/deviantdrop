@@ -26,6 +26,14 @@ docker compose up -d --build
 ### 登录与管理员命令
 
 - **`/login`（管理员）**：在 Telegram 里一键完成 DeviantArt Web OAuth 授权。点按钮在浏览器授权后，refresh token 立即在服务器生效，**无需 SSH / 改 .env / 重启**。需要配置 `PUBLIC_BASE_URL`，并把 `<PUBLIC_BASE_URL>/auth/deviantart/callback` 加入 DA 应用的 redirect 白名单。
+  - **没有公网域名？** 用「ssh 隧道 + 本机浏览器」登录，无需开任何端口或域名：两个终端执行（DA 白名单已含 `http://127.0.0.1:8787/callback`）
+    ```bash
+    # 终端 1（保持打开，建立隧道）
+    ssh -L 8787:127.0.0.1:8787 root@<VPS>
+    # 终端 2
+    ssh root@<VPS> 'cd /opt/deviantdrop && ./scripts/vps-login.sh'
+    ```
+    然后本机浏览器打开 `http://127.0.0.1:8787` 完成授权即可（浏览器需能访问 deviantart.com）。凭据直接写入服务器并自动重启生效（约 30 秒）。
 - **`/cookies`（管理员私聊）**：打开受保护的 Cookie 更新表单，保存后立即生效。OAuth 不会自动读取浏览器 Cookie。
 - **`/status`（管理员）**：查看 Telegram / OAuth / Cookie / TelePress / Cache 状态（不显示任何密钥）。
 - `DA_REFRESH_TOKEN` / `DA_COOKIES` 只作为**首次迁移 seed**：启动时写入 `/data/auth/deviantart.json` 与 `/data/auth/deviantart-cookies.json`，之后以这些文件为准（refresh token 轮换即落盘、失效自动标记；Cookie 支持热更新），不再回退读 .env 里的旧值。

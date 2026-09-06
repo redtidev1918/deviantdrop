@@ -2,11 +2,30 @@
 
 ## 首次配置与登录
 
+### 有公网域名（推荐，启用 Telegram 内 `/login` 与预览页）
+
 1. 将域名解析到 VPS，配置 HTTPS 反向代理到 `127.0.0.1:8080`。应用默认仅监听本机；无需公开原始 HTTP 端口。
 2. 设置 `PUBLIC_BASE_URL=https://bot.example.com`、`CLIENT_ID`、`CLIENT_SECRET`、`ADMIN_IDS`（Telegram 用户 ID）。未指定管理员且用户白名单为空时，管理命令全部拒绝；不要把普通使用者当作管理员。
 3. 在 DeviantArt 应用的 redirect whitelist 加入完整的 `https://bot.example.com/auth/deviantart/callback`。
 4. 初次环境配置需重建容器；之后管理员在 **Bot 私聊**发送 `/login`，打开 5 分钟一次性链接，在 DeviantArt 官方站授权。
 5. 回调校验 state、浏览器会话、PKCE；保存成功后立即生效，并发一次恢复通知。落盘失败不会显示成功。OAuth 协议见 [官方认证文档](https://deviantart.readme.io/docs/authentication)。
+
+### 只有公网 IP、没有域名（ssh 隧道登录）
+
+DA 应用回调白名单已含 `http://127.0.0.1:8787/callback`（OAuth 对 localhost 允许 http），因此**无需**为登录开放任何公网端口、无需域名：
+
+1. 确保 VPS 上 `.env` 有 `CLIENT_ID`/`CLIENT_SECRET`（凭据在容器里，脚本从 `.env` 读取）。
+2. 两个终端：
+   ```bash
+   # 终端 1：保持打开，建立隧道（把 VPS 的 8787 映射到本机 8787）
+   ssh -L 8787:127.0.0.1:8787 root@<VPS-IP>
+   # 终端 2：在 VPS 上启动登录服务（10 分钟内有效）
+   ssh root@<VPS-IP> 'cd /opt/deviantdrop && ./scripts/vps-login.sh'
+   ```
+3. 本机浏览器打开 `http://127.0.0.1:8787` → 自动跳到 DeviantArt 授权页 → 授权后重定向回 `127.0.0.1:8787/callback`（经隧道到达 VPS 的登录服务）→ refresh token 原子写入 `deviantdrop_cache` 卷的 `/data/auth/deviantart.json`，脚本自动 `chown 1000:1000` 并 `docker compose restart`，约 30 秒生效。
+4. 浏览器需能访问 deviantart.com（国内网络请给浏览器配代理）；授权页在 DeviantArt 官方站完成，应用不代替你登录。
+
+两种方式写的是同一份 `/data/auth/deviantart.json`，之后的轮换/失效处理完全一致。没有公网域名时 `/login` 内按钮与 `/d/:id` 预览页不启用（属可选功能），其余发送功能不受影响。
 
 应用不能代替你在 DeviantArt 完成登录或同意授权。OAuth 也不能取得浏览器 Cookie。
 

@@ -22,6 +22,8 @@ const store=new CredentialStore({path:join(process.env.AUTH_DIR||join(homedir(),
 let consumed=false;
 const server=createServer(async(req,res)=>{
   const query=new URL(req.url,redirectUri);
+  // 根路径 302 到 DA 授权页：浏览器打开 http://127.0.0.1:<port> 即可，无需复制长 URL。
+  if(query.pathname==='/'){res.writeHead(302,{Location:url.href}).end();return;}
   if(query.pathname!=='/callback'){res.writeHead(404).end();return;}
   if(consumed||query.searchParams.get('state')!==state){res.writeHead(400).end('Invalid state');return;}
   consumed=true;
@@ -34,10 +36,13 @@ const server=createServer(async(req,res)=>{
     const data=await response.json();
     if(!response.ok||!data.refresh_token)throw new Error('Token exchange failed');
     store.save(data.refresh_token);
-    res.writeHead(200,{'Content-Type':'text/plain; charset=utf-8','Cache-Control':'no-store'}).end('已保存本地凭据，可以关闭本页。生产环境请使用 Bot 的 /login。');
-    console.log(`凭据已保存到 ${store.path}（未部署）。`);
+    res.writeHead(200,{'Content-Type':'text/plain; charset=utf-8','Cache-Control':'no-store'}).end('DeviantArt 登录成功，可以关闭本页。');
+    console.log(`凭据已保存到 ${store.path}`);
   }catch{res.writeHead(500).end('Login failed');}
   finally{server.close();clearTimeout(timeout);}
 });
 const timeout=setTimeout(()=>{server.close();process.exitCode=1;},10*60*1000);
-server.listen(port,'127.0.0.1',()=>console.log(`在浏览器打开：\n${url.href}`));
+server.listen(port,'127.0.0.1',()=>{
+  console.log(`登录服务已启动（10 分钟内有效）。`);
+  console.log(`浏览器打开： http://127.0.0.1:${port}`);
+});
