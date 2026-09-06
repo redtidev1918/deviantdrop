@@ -345,7 +345,9 @@ async function sendDeviantArt(url, message, env, origin, sessionMemo = {}, onSta
   }
   try {
     const media = await resolveWebMedia(url, env, origin, sessionMemo);
-    dlog("send", `web ok id=${target.id} kind=${media.kind} url=${shortUrl(media.url)} display=${shortUrl(media.display)} displayBlur=${/blur_/.test(media.display || "")}`);
+    dlog("send", `web ok id=${target.id} kind=${media.kind} url=${shortUrl(media.url)} display=${shortUrl(media.display)} displayBlur=${/blur_/.test(media.display || "")} matureBlurred=${!!media.matureBlurred}`);
+    // 成熟作品 OAuth 取原图失败（登录过期/无 uuid）时，在标题后明确提示，而不是静默发打码图。
+    const title = media.matureBlurred ? `${media.title}（登录已过期，成熟作品仅能发打码预览，请重新授权）` : media.title;
     const items = [{ kind: media.kind, url: media.url, display: media.display }, ...(media.extras || [])];
     // 多文件作品：主图 + 附加图合并成一条 Telegram 相册（≤10、仅 photo/video 时）；
     // 否则退回单图发送（此时记得 file_id 供后续去重）
@@ -354,12 +356,12 @@ async function sendDeviantArt(url, message, env, origin, sessionMemo = {}, onSta
       const chunks = [];
       for (let i = 0; i < items.length; i += 10) chunks.push(items.slice(i, i + 10));
       for (let ci = 0; ci < chunks.length; ci += 1) {
-        const caption = ci === 0 ? `${media.title}\n${url.href}` : "";
+        const caption = ci === 0 ? `${title}\n${url.href}` : "";
         const albumResults = await sendAlbum(chunks[ci], caption, message, env, !origin, onStatus);
         if (chunks.length === 1) await rememberAlbumFileIds(target.id, media.title, albumResults, env);
       }
     } else {
-      const sent = await sendOne(media.kind, media.url, `${media.title}\n${url.href}`, message, env, !origin, onStatus, media.display);
+      const sent = await sendOne(media.kind, media.url, `${title}\n${url.href}`, message, env, !origin, onStatus, media.display);
       if (items.length === 1) await rememberFileId(target.id, media.kind, media.title, sent, env);
       for (const extra of media.extras || []) {
         await sendOne(extra.kind, extra.url, `（${media.title} 的更多画面）`, message, env, !origin, onStatus, extra.display);
@@ -405,6 +407,7 @@ async function resolveWebMedia(url, env, origin, sessionMemo) {
       const item = extractDeviantArtMedia(deviation, allowMature);
       dlog("media", `dev=${target.id} mature=${deviation?.isMature === true} allowMature=${allowMature} webKind=${item.kind} webUrl=${shortUrl(item.url)} blur=${/blur_/.test(item.url || "")}`);
       // 成熟作品：用用户 OAuth 走官方接口取“未打码原图”，替代打码的网页预览
+      let matureBlurred = false;
       if (deviation?.isMature === true && env.DA_REFRESH_TOKEN) {
         const uuid = deviation?.extended?.deviationUuid;
         try {
@@ -416,12 +419,15 @@ async function resolveWebMedia(url, env, origin, sessionMemo) {
               item.kind = extensionKind(original) || item.kind;
               dlog("media", `mature override OK dev=${target.id} uuid=${uuid} kind=${item.kind} url=${shortUrl(original)} blur=${/blur_/.test(original)}`);
             } else {
+              matureBlurred = true;
               dlog("media", `mature override EMPTY dev=${target.id} uuid=${uuid} → 回退网页预览`);
             }
           } else {
+            matureBlurred = true;
             dlog("media", `mature override SKIP dev=${target.id} 无 uuid → 回退网页预览`);
           }
         } catch (error) {
+          matureBlurred = true;
           dlog("media", `mature override FAILED dev=${target.id} → ${error instanceof Error ? error.message : String(error)} → 回退网页预览`);
         }
       }
@@ -455,6 +461,8 @@ async function resolveWebMedia(url, env, origin, sessionMemo) {
         display,
         title: item.title,
         extras,
+        // 成熟作品未能用 OAuth 取到未打码原图时置真，供上层在 caption 里提示“登录已过期”。
+        matureBlurred,
       };
     } catch (error) {
       const text = error instanceof Error ? error.message : String(error);

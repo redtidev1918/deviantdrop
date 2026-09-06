@@ -113,8 +113,9 @@ const tmp = "/tmp/dd_rt.txt";
 writeFileSync(tmp, data.refresh_token);
 try {
   await execFileAsync("scp", ["-q", tmp, server + ":/tmp/dd_rt.txt"], { timeout: 120000 });
+  // 注意：sed 替换串必须用双引号，让远端 shell 展开 $RT；单引号会把字面 "$RT" 写进 .env。
   const remote = "RT=$(cat /tmp/dd_rt.txt) && cd /opt/deviantdrop && " +
-    "(grep -q '^DA_REFRESH_TOKEN=' .env && sed -i 's|^DA_REFRESH_TOKEN=.*|DA_REFRESH_TOKEN=$RT|' .env || echo \"DA_REFRESH_TOKEN=$RT\" >> .env) && " +
+    "(grep -q '^DA_REFRESH_TOKEN=' .env && sed -i \"s|^DA_REFRESH_TOKEN=.*|DA_REFRESH_TOKEN=$RT|\" .env || echo \"DA_REFRESH_TOKEN=$RT\" >> .env) && " +
     "chmod 600 .env && docker compose up -d >/dev/null 2>&1 && echo DEPLOYED";
   await execFileAsync("ssh", [server, remote], { timeout: 300000, maxBuffer: 1024 * 1024 });
   console.log("✅ 已写入 /opt/deviantdrop/.env 并重启容器。");
