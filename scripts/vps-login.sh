@@ -35,6 +35,7 @@ echo "=============================="
 
 # 把最新登录脚本拷进容器（镜像不含 scripts/，容器重建后此处重新拷贝）并前台运行：
 # 授权完成（或 10 分钟超时）后进程退出。容器内以 node 用户跑，直接写 /data/auth。
+docker exec -u 0 "$CONTAINER" mkdir -p /app/scripts
 docker cp scripts/da-login.mjs "$CONTAINER":/app/scripts/da-login.mjs
 docker compose exec -T deviantdrop env AUTH_DIR=/data/auth node /app/scripts/da-login.mjs "$CID" "$CSEC" 8787
 
