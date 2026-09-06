@@ -10,6 +10,13 @@
 
 ---
 
+## [1.6.2](https://github.com/redtidev1918/deviantdrop/compare/v1.6.1...v1.6.2) (2026-09-06)
+
+
+### Bug Fixes
+
+* **release:** align automation manifest with published v1.6.1 ([154cd4b](https://github.com/redtidev1918/deviantdrop/commit/154cd4b565a93cd9742f46670e869586c292e6fc))
+
 ## [1.6.1] - 2026-09-06
 
 ### 变更
