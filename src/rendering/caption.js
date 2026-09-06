@@ -87,16 +87,27 @@ export function renderCap(cap, statusOverride = {}) {
   return { text, entities: entity ? [entity] : [] };
 }
 
-// Telegram 端点对 caption_entities 偏移的计数不一致（线上实测）：
-//   - JSON 请求（sendMessage/sendPhoto by URL 等）按 UTF-16 code unit 校验；
-//   - multipart 上传请求（sendPhoto/sendMediaGroup 带 attach:// 文件）按 Unicode code
-//     point 校验。caption 含 emoji/中文时两者会差出偏移（如 107 vs 103），按 UTF-16 发
-//     multipart 会报 "entity begins in a middle of a UTF-16 symbol"。
-// multipart 发送前用本函数把 UTF-16 offset 换算成 code point offset。
-export function toMultipartEntities(captionText, entities) {
+// Telegram 官方 MessageEntity 的 offset/length 语义是 UTF-16 code unit，sourceLinkEntity
+// 产出的正是标准 UTF-16 entity，JSON Bot API 请求应原样发送。
+//
+// 但线上实测发现 Bot API 的 multipart 上传端点（sendPhoto/sendMediaGroup 带 attach:// 文件，
+// caption 走 form-data 字段）对实体偏移按 Unicode code point 校验：同一 caption（含 emoji/
+// 中文），JSON 用 UTF-16 offset 成功，multipart 用同一 offset 报 "entity begins in a middle
+// of a UTF-16 symbol"。这是实测出来的 transport 兼容行为（不是对协议的重新定义），所以只在
+// multipart 路径做一次归一化：把 UTF-16 offset/length 换算成 code point。
+// 若将来 Telegram 修复该差异，删掉此层即可，JSON 路径不受影响。
+export function normalizeEntitiesForMultipart(text, entities) {
   if (!entities?.length) return entities || [];
   return entities.map((entity) => {
     if (entity.offset == null) return entity;
-    return { ...entity, offset: [...captionText.slice(0, entity.offset)].length };
+    const before = text.slice(0, entity.offset);
+    const segment = entity.length != null ? text.slice(entity.offset, entity.offset + entity.length) : "";
+    return {
+      ...entity,
+      offset: [...before].length,
+      length: entity.length != null ? [...segment].length : entity.length,
+    };
   });
 }
+// 兼容别名（v1.5.1 之前的导出名，避免外部/历史引用破裂）。
+export const toMultipartEntities = normalizeEntitiesForMultipart;

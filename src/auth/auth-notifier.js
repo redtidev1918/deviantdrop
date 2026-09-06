@@ -74,8 +74,7 @@ export class AuthNotifier {
   }
 }
 
-// 管理员 id 列表：ALLOWED_USER_IDS 的第一个作为默认管理员，可用 ADMIN_IDS 覆盖。
+// 管理员（Bot 所有者）id 列表：只认 ADMIN_IDS；ALLOWED_USER_IDS（普通使用者白名单）不等于管理员。
 export function resolveAdminIds(env = {}) {
-  const raw = env.ADMIN_IDS || env.ALLOWED_USER_IDS || "";
-  return String(raw).split(",").map((s) => s.trim()).filter(Boolean);
+  return String(env.ADMIN_IDS || "").split(",").map((s) => s.trim()).filter(Boolean);
 }

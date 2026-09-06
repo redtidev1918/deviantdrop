@@ -843,7 +843,7 @@ test("/status 与 /login：管理员可用、/status 不泄漏 secret、非管�
   // 非管理员：被拒绝
   await handleUpdate({ update_id: 3, message: { message_id: 3, from: { id: 99 }, chat: { id: 99, type: "private" }, text: "/status" } }, env);
   const denied = sends[sends.length - 1].body.text;
-  assert.match(denied, /仅管理员可用/);
+  assert.match(denied, /仅 Bot 所有者可用/);
 });
 
 test('admin login is denied without configured admins and in public groups',async t=>{
@@ -851,7 +851,7 @@ test('admin login is denied without configured admins and in public groups',asyn
  globalThis.fetch=async(url,init)=>{sends.push(JSON.parse(init.body));return Response.json({ok:true,result:{message_id:1}});};
  const env={BOT_TOKEN:'111:secret',WEBHOOK_SECRET:'secret',PUBLIC_BASE_URL:'https://bot.example',authFlow:{configured:()=>true,issueLoginToken:()=>{throw new Error('Must not issue');}}};
  await handleUpdate({message:{from:{id:42},chat:{id:42,type:'private'},message_id:1,text:'/login'}},env);
- assert.match(sends.at(-1).text,/仅管理员/);
+ assert.match(sends.at(-1).text,/管理命令未启用/);
  await handleUpdate({message:{from:{id:42},chat:{id:-42,type:'supergroup'},message_id:1,text:'/login'}},{...env,ADMIN_IDS:'42'});
  assert.match(sends.at(-1).text,/私聊/);
  assert.ok(sends.every(s=>!s.reply_markup));
@@ -896,4 +896,27 @@ test('cookie update replaces a cached authenticated session without restarting',
  const message=id=>({chat:{id:789,type:'private'},message_id:1,text:`https://www.deviantart.com/artist/art/cookie-${id}`});
  await handleUpdate({message:message(1)},env);cookie='auth=new';await handleUpdate({message:message(2)},env);
  assert.deepEqual(homes,['auth=old','auth=new']);assert.deepEqual(initCookies,homes);
+});
+
+test('ALLOWED_USER_IDS 白名单不是管理员：未配 ADMIN_IDS 时 /status 被拒', async t => {
+  const { handleUpdate } = await import("../src/index.js");
+  const original = globalThis.fetch;
+  t.after(() => { globalThis.fetch = original; });
+  t.after(installFakeCache());
+  const sends = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    if (u.includes("api.telegram.org")) { sends.push({ body: JSON.parse(init.body) }); return Response.json({ ok: true, result: { message_id: 1 } }); }
+    throw new Error("unexpected " + u);
+  };
+  const env = {
+    BOT_TOKEN: "111:secret", WEBHOOK_SECRET: "secret",
+    ALLOWED_USER_IDS: "42", // 普通使用者白名单
+    PUBLIC_BASE_URL: "https://bot.example",
+    authFlow: { configured: () => true, issueLoginToken: () => { throw new Error("must not issue"); } },
+  };
+  // 即使 from=42 在白名单里，没有 ADMIN_IDS 也不能用管理命令
+  await handleUpdate({ update_id: 1, message: { message_id: 1, from: { id: 42 }, chat: { id: 42, type: "private" }, text: "/status" } }, env);
+  assert.match(sends.at(-1).body.text, /管理命令未启用/);
+  assert.ok(!sends.at(-1).body.reply_markup, "不得泄露任何管理入口");
 });

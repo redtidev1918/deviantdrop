@@ -1,6 +1,6 @@
 const TELEGRAM_API = "https://api.telegram.org";
 const DEVIANTART = "https://www.deviantart.com/";
-import { renderArtworkCaption, sourceLinkEntity, openButtonMarkup as buildOpenMarkup, buildCapFromMedia, toMultipartEntities } from "./rendering/caption.js";
+import { renderArtworkCaption, sourceLinkEntity, openButtonMarkup as buildOpenMarkup, buildCapFromMedia, normalizeEntitiesForMultipart } from "./rendering/caption.js";
 import { publishArtwork } from "./publishing/gallery.js";
 import { fetchPublicMedia } from "./preview/server.js";
 import { getOfficialToken, clearOAuthAccessToken } from "./auth/token.js";
@@ -287,10 +287,15 @@ async function handleAdminCommand(command, message, env) {
   };
   const send = (text, extra = {}) => telegram(env, "sendMessage", { chat_id: message.chat.id, text, ...replyOpts, ...extra });
 
-  // 门禁：管理员列表非空时，非管理员不可用。ADMIN_IDS 优先，否则回退 ALLOWED_USER_IDS。
-  const adminIds = String(env.ADMIN_IDS || env.ALLOWED_USER_IDS || "").split(",").map((s) => s.trim()).filter(Boolean);
+  // 门禁：管理命令只允许 Bot 所有者（ADMIN_IDS = Bot 所有者的 Telegram 用户 id）。
+  // 不配置 ADMIN_IDS 时一律拒绝；普通用户白名单（ALLOWED_USER_IDS）不等于管理员。
+  const adminIds = String(env.ADMIN_IDS || "").split(",").map((s) => s.trim()).filter(Boolean);
+  if (!adminIds.length) {
+    await send("管理命令未启用：请在 .env 设置 ADMIN_IDS（Bot 所有者的 Telegram 用户 id）。");
+    return;
+  }
   if (!adminIds.includes(String(message.from?.id ?? ""))) {
-    await send("这个命令仅管理员可用。");
+    await send("这个命令仅 Bot 所有者可用。");
     return;
   }
 
@@ -975,7 +980,7 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null, 
         ...(i === 0 ? {
           caption: fullCaption,
           // multipart 端点按 code point 校验实体偏移（见 caption.js toMultipartEntities）
-          ...(fullEntities.length ? { caption_entities: toMultipartEntities(fullCaption, fullEntities) } : {}),
+          ...(fullEntities.length ? { caption_entities: normalizeEntitiesForMultipart(fullCaption, fullEntities) } : {}),
         } : {}),
       }))));
       entries.forEach(({ bytes, extension }, i) => {
@@ -991,7 +996,7 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null, 
     results.push(await telegramForm(env, method, () => {
       const f = mediaForm();
       f.set("caption", fullCaption);
-      if (fullEntities.length) f.set("caption_entities", JSON.stringify(toMultipartEntities(fullCaption, fullEntities)));
+      if (fullEntities.length) f.set("caption_entities", JSON.stringify(normalizeEntitiesForMultipart(fullCaption, fullEntities)));
       // 单张（entries 只剩 1，其余降级文档）支持 inline 按钮：补上来源按钮。
       const markup = buildOpenMarkup(cap.sourceUrl);
       if (markup) f.set("reply_markup", JSON.stringify(markup));
@@ -1004,7 +1009,7 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null, 
     results.push(await telegramForm(env, "sendDocument", () => {
       const f = mediaForm();
       f.set("caption", fullCaption);
-      if (fullEntities.length) f.set("caption_entities", JSON.stringify(toMultipartEntities(fullCaption, fullEntities)));
+      if (fullEntities.length) f.set("caption_entities", JSON.stringify(normalizeEntitiesForMultipart(fullCaption, fullEntities)));
       const markup = buildOpenMarkup(cap.sourceUrl);
       if (markup) f.set("reply_markup", JSON.stringify(markup));
       f.set("document", new Blob([doc.bytes], { type: "application/octet-stream" }), `original.${doc.extension}`);
@@ -1167,7 +1172,7 @@ async function uploadMedia(env, kind, mediaUrl, caption, message, onStatus = nul
     const form = new FormData();
     form.set("chat_id", String(message.chat.id));
     form.set("caption", captionText);
-    if (captionEntities.length) form.set("caption_entities", JSON.stringify(toMultipartEntities(captionText, captionEntities)));
+    if (captionEntities.length) form.set("caption_entities", JSON.stringify(normalizeEntitiesForMultipart(captionText, captionEntities)));
     form.set("reply_parameters", JSON.stringify({ message_id: message.message_id, allow_sending_without_reply: true }));
     if (openMarkup) form.set("reply_markup", JSON.stringify(openMarkup));
     if (message.message_thread_id) form.set("message_thread_id", String(message.message_thread_id));

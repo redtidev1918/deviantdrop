@@ -7,6 +7,7 @@ import {
   sourceLineText,
   buildCapFromMedia,
   toMultipartEntities,
+  normalizeEntitiesForMultipart,
 } from "../src/rendering/caption.js";
 
 test("caption 不含裸 URL，来源通过 text_link entity 承载", () => {
@@ -101,4 +102,25 @@ test("toMultipartEntities：UTF-16 offset 换算为 code point offset（multipar
   assert.equal(asciiMp[0].offset, 29);
   const asciiCp = [...ascii];
   assert.equal(asciiCp.slice(asciiMp[0].offset, asciiMp[0].offset + asciiMp[0].length).join(""), "DeviantArt");
+});
+
+test("normalizeEntitiesForMultipart：offset 与 length 都按 code point 换算", () => {
+  // 人为构造一个非 ASCII 文本段实体（如中文标签），验证 length 也换算
+  const text = "🎨 标题！👤 作者 🔗 中文来源段末尾";
+  const utf16 = { type: "text_link", offset: text.indexOf("中文来源段"), length: "中文来源段".length, url: "https://x" };
+  assert.equal(utf16.offset, 15); // 2 个 emoji 代理对使 UTF-16 偏移大于 code point 偏移
+  const mp = normalizeEntitiesForMultipart(text, [utf16]);
+  assert.equal(mp[0].offset, [...text.slice(0, utf16.offset)].length, "offset 转 code point");
+  assert.equal(mp[0].length, [...text.slice(utf16.offset, utf16.offset + utf16.length)].length, "length 转 code point");
+  const seg = [...text].slice(mp[0].offset, mp[0].offset + mp[0].length).join("");
+  assert.equal(seg, "中文来源段");
+});
+
+test("JSON 路径保持 UTF-16 entity（不经过 multipart 归一化）", () => {
+  const { text } = renderArtworkCaption({ title: "Heavy Mama Hunt (2,3/19)", author: "MrjoelPreggoArt", mediaCount: 2 }, { compressed: true });
+  const entity = sourceLinkEntity(text, "https://www.deviantart.com/x");
+  // sourceLinkEntity 输出就是 UTF-16 标准 entity，JSON 请求应原样发送
+  assert.equal(text.slice(entity.offset, entity.offset + entity.length), "DeviantArt");
+  // 归一化只应由 multipart 路径调用，绝不能反向污染 JSON entity
+  assert.notEqual(entity.offset, normalizeEntitiesForMultipart(text, [entity])[0].offset);
 });

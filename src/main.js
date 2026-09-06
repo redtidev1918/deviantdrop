@@ -98,7 +98,7 @@ if (publicBaseUrl) {
   if (u.protocol !== "https:" || u.username || u.password || u.search || u.hash || u.pathname !== "/") throw new Error("PUBLIC_BASE_URL must be an HTTPS origin");
 }
 const redirectUri = publicBaseUrl ? `${publicBaseUrl}/auth/deviantart/callback` : "";
-const adminIds = resolveAdminIds({ ADMIN_IDS: process.env.ADMIN_IDS, ALLOWED_USER_IDS: process.env.ALLOWED_USER_IDS });
+const adminIds = resolveAdminIds({ ADMIN_IDS: process.env.ADMIN_IDS });
 
 const loginStartBase = publicBaseUrl ? `${publicBaseUrl}/auth/deviantart/start` : null;
 let authNotifier; // 先声明：flow 回调在运行时才用到，此时已完成赋值
