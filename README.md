@@ -23,21 +23,21 @@ docker compose up -d --build
 - 图片 / 多图相册（sendMediaGroup，超过 10 张自动分批）/ GIF / 视频 / 超大图压缩与 document 兜底；Telegram 拉不动 CDN 时自动下载后 multipart 上传。
 - `/start` `/help` `/about` 命令；每聊天限流、去重、429/500/503 退避重试。
 
-### 登录与管理员命令
+### 登录与所有者命令
 
-- **`/login`（管理员）**：在 Telegram 里一键完成 DeviantArt Web OAuth 授权。点按钮在浏览器授权后，refresh token 立即在服务器生效，**无需 SSH / 改 .env / 重启**。需要配置 `PUBLIC_BASE_URL`，并把 `<PUBLIC_BASE_URL>/auth/deviantart/callback` 加入 DA 应用的 redirect 白名单。
-  - **没有公网域名？** 用「ssh 隧道 + 本机浏览器」登录，无需开任何端口或域名：两个终端执行（DA 白名单已含 `http://127.0.0.1:8787/callback`）
-    ```bash
-    # 终端 1（保持打开，建立隧道）
-    ssh -L 8787:127.0.0.1:8787 root@<VPS>
-    # 终端 2
-    ssh root@<VPS> 'cd /opt/deviantdrop && ./scripts/vps-login.sh'
-    ```
-    然后本机浏览器打开 `http://127.0.0.1:8787` 完成授权即可（浏览器需能访问 deviantart.com）。凭据直接写入服务器并自动重启生效（约 30 秒）。
-- **`/cookies`（管理员私聊）**：打开受保护的 Cookie 更新表单，保存后立即生效。OAuth 不会自动读取浏览器 Cookie。
-- **`/status`（管理员）**：查看 Telegram / OAuth / Cookie / TelePress / Cache 状态（不显示任何密钥）。
+管理命令（`/login`、`/status`）只允许 **Bot 所有者**使用：在 `.env` 设置 `ADMIN_IDS=<你的 Telegram 用户 ID>`。未配置时管理命令一律拒绝；普通使用者白名单（`ALLOWED_USER_IDS`）不是管理员。
+
+**登录一次，多图作品的所有画面（含成熟作品的附加页）都会未打码发送。** 登录同时建立账号授权（OAuth）和网页登录状态（Cookie），二者都立即在服务器生效，**无需手动复制 Cookie、无需改配置、无需重启**。
+
+- **推荐：电脑一键登录（无公网域名也能用）**。在你的电脑上（需装有 Chrome/Edge），于 DeviantDrop 目录运行：
+  ```bash
+  VPS=root@<你的服务器> npm run login
+  ```
+  脚本会自动打开 Chrome 进入 DeviantArt 官方登录页：你登录并点「Authorize/允许」，脚本自动把授权和网页登录状态推送到服务器并热生效。DA 的登录页有 AWS WAF 人机校验，用你自己的真实浏览器登录即可正常通过（这也是必须在你电脑上、而不是在服务器上跑浏览器的原因）。Windows/Linux 同样适用；服务器地址可用 `VPS=` 环境变量传入，不传会交互询问。完成后 `/status` 显示 `OAuth: valid`、`Cookie: available`。
+- **有公网域名（`PUBLIC_BASE_URL`）**：在 Telegram 私聊发 `/login`，点按钮在浏览器授权即可（仅建立 OAuth；想要附加页也未打码，仍建议用上面的电脑一键登录，它会一并登录网页）。
+- **`/status`（所有者私聊）**：查看 Telegram / OAuth / Cookie / TelePress / Cache 状态（不显示任何密钥）。
 - `DA_REFRESH_TOKEN` / `DA_COOKIES` 只作为**首次迁移 seed**：启动时写入 `/data/auth/deviantart.json` 与 `/data/auth/deviantart-cookies.json`，之后以这些文件为准（refresh token 轮换即落盘、失效自动标记；Cookie 支持热更新），不再回退读 .env 里的旧值。
-- 登录失效时管理员收到带「重新登录」按钮的通知（6 小时冷却，恢复后另发一次恢复通知）。
+- 登录失效时 Bot 所有者收到带「重新登录」按钮的通知（6 小时冷却，恢复后另发一次恢复通知）。
 
 ### 回复排版
 

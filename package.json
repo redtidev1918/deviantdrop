@@ -27,7 +27,7 @@
     "detect": "node scripts/detect-da.mjs",
     "test": "node --test",
     "check": "npm test && wrangler deploy --dry-run --outdir dist",
-    "login": "node scripts/da-login.mjs",
+    "login": "node scripts/dd-login.mjs",
     "deploy:vps": "bash -c 'test -n \"$SERVER\" || { echo \"Set SERVER=user@host\"; exit 1; }; npm run check && git push origin main && ssh \"$SERVER\" \"cd /opt/deviantdrop && git pull --ff-only && docker compose up -d --build\"'",
     "logs": "bash -c 'test -n \"$SERVER\" || { echo \"Set SERVER=user@host\"; exit 1; }; ssh \"$SERVER\" \"docker logs -f deviantdrop-deviantdrop-1\"'"
   },

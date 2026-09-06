@@ -304,24 +304,37 @@ async function handleAdminCommand(command, message, env) {
     return;
   }
 
+  // /cookies 已并入一键登录（/login）：登录一次同时拿到 OAuth 与网页 Cookie，
+  // 无需再手动复制 Cookie。保留命令名作为引导别名。
   if (command === "cookies") {
-    if (!env.PUBLIC_BASE_URL || !env.cookieStore) { await send("Cookie 管理入口未配置 PUBLIC_BASE_URL。"); return; }
-    const token = env.authFlow.issueLoginToken("cookies");
-    await send("通过浏览器表单更新 Cookie，无需重启。", { reply_markup: { inline_keyboard: [[{ text: "更新 Cookie", url: `${env.PUBLIC_BASE_URL}/auth/deviantart/cookies?t=${token}` }]] } });
+    await send(
+      "无需再手动复制 Cookie：在电脑上运行一条命令，浏览器登录一次即可同时登录账号和网页，多图全部未打码。\n\n" +
+      "在你的电脑（需装 Chrome/Edge）进入 DeviantDrop 目录，运行：\n`VPS=root@<你的服务器> npm run login`\n\n" +
+      "弹出的 Chrome 里登录 DeviantArt 并点「Authorize/允许」，登录状态会自动推送到服务器并立即生效。",
+    );
     return;
   }
 
   if (command === "login") {
     const authFlow = env.authFlow;
-    if (!env.PUBLIC_BASE_URL || !authFlow?.configured?.()) {
-      await send("Web OAuth 登录未配置：需要设置 PUBLIC_BASE_URL 且提供 CLIENT_ID（见 README「Web 登录」）。\n当前仍可使用 scripts/da-login.mjs 命令行登录。");
+    // 有公网域名：浏览器一键授权（OAuth）。
+    if (env.PUBLIC_BASE_URL && authFlow?.configured?.()) {
+      const token = authFlow.issueLoginToken();
+      const startUrl = `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/auth/deviantart/start?t=${encodeURIComponent(token)}`;
+      await send("DeviantArt 登录需要更新。点击下方按钮，在浏览器里授权即可（无需重启服务）：\n\n提示：想让多图作品的附加页也发未打码画面，请改用电脑一键登录（见 /login 说明里的命令），它会同时登录网页账号。", {
+        reply_markup: { inline_keyboard: [[{ text: "重新登录 DeviantArt", url: startUrl }]] },
+      });
       return;
     }
-    const token = authFlow.issueLoginToken();
-    const startUrl = `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/auth/deviantart/start?t=${encodeURIComponent(token)}`;
-    await send("DeviantArt 登录需要更新。点击下方按钮，在浏览器里授权即可（无需重启服务）：", {
-      reply_markup: { inline_keyboard: [[{ text: "重新登录 DeviantArt", url: startUrl }]] },
-    });
+    // 无公网域名（ssh 隧道/家用机）：用本机一键登录器，浏览器登录一次同时拿 OAuth + 网页 Cookie。
+    await send(
+      "DeviantArt 一键登录（同时登录账号 + 网页，多图作品全部未打码）：\n\n" +
+      "1. 在你的电脑上打开终端，进入 DeviantDrop 目录；\n" +
+      "2. 运行：`VPS=root@<你的服务器> node scripts/dd-login.mjs`；\n" +
+      "3. 会自动打开 Chrome，在 DeviantArt 官方页登录并点「Authorize/允许」；\n" +
+      "4. 脚本自动把登录状态推送到服务器并立即生效，无需重启、无需手动复制 Cookie。\n\n" +
+      "需要电脑装有 Chrome；服务器地址按实际填写。完成后发 /status 应显示 OAuth: valid、Cookie: available。",
+    );
     return;
   }
 
@@ -493,6 +506,12 @@ async function sendDeviantArt(url, message, env, origin, sessionMemo = {}, onSta
   if(published){try{await sendPublishedLink(message,env,target.id,url.href,published);}catch{/* optional action */}}
 }
 
+// 成熟多图作品的附加页是否应跳过：仅当「成熟作品 + 无网页登录 Cookie + 确有附加页」时。
+// 有网页登录 Cookie 时 init 下发的附加页是未打码原始文件，必须解析发送（这是多图全未打码的关键）。
+function shouldSkipMatureExtras({ isMature, hasWebCookie, raw }) {
+  return isMature && !hasWebCookie && Array.isArray(raw) && raw.length > 0;
+}
+
 // "标题 — 作者" 拆回标题/作者（供 file_id 重放时重建 cap）。
 function splitTitleAuthor(title) {
   const m = String(title || "").match(/^(.*?)\s+—\s+([^—]+)$/);
@@ -553,13 +572,21 @@ async function resolveWebMedia(url, env, origin, sessionMemo) {
       const deviation = data.deviation;
       // 有用户 OAuth（CredentialStore 里的 refresh token）或登录 Cookie 都视为已登录，放行成熟内容
       const hasOAuth = !!(env.credentialStore ? env.credentialStore.getRefreshToken() : env.DA_REFRESH_TOKEN);
-      const allowMature = Boolean(currentDaCookies(env) || hasOAuth);
+      const hasWebCookie = Boolean(currentDaCookies(env));
+      const allowMature = Boolean(hasWebCookie || hasOAuth);
       const item = extractDeviantArtMedia(deviation, allowMature);
-      dlog("media", `dev=${target.id} mature=${deviation?.isMature === true} allowMature=${allowMature} webKind=${item.kind} webUrl=${shortUrl(item.url)} blur=${/blur_/.test(item.url || "")}`);
-      // 成熟作品：用用户 OAuth 走官方接口取“未打码原图”，替代打码的网页预览
+      dlog("media", `dev=${target.id} mature=${deviation?.isMature === true} allowMature=${allowMature} webCookie=${hasWebCookie} webKind=${item.kind} webUrl=${shortUrl(item.url)} blur=${/blur_/.test(item.url || "")}`);
+      // 成熟作品主图未打码来源：
+      //   - 有网页登录 Cookie：init 下发的主图 baseUri 即未打码原始文件（实测签名 CDN 可直连下载，
+      //     不占 /download 原图配额），直接认定已到手——不再走官方 OAuth override（多图作品官方
+      //     API 常 404/只返回主图），也不降级成小 preview。
+      //   - 无网页 Cookie 但有 OAuth：尝试官方接口取未打码原图替代打码网页预览（旧路径）。
       let matureBlurred = false;
       let matureOverrideOk = false;
-      if (deviation?.isMature === true && hasOAuth) {
+      if (deviation?.isMature === true && hasWebCookie) {
+        matureOverrideOk = true;
+        dlog("media", `mature 网页登录态 dev=${target.id} kind=${item.kind} url=${shortUrl(item.url)} blur=${/blur_/.test(item.url || "")}`);
+      } else if (deviation?.isMature === true && hasOAuth) {
         const uuid = deviation?.extended?.deviationUuid;
         try {
           if (uuid) {
@@ -586,26 +613,30 @@ async function resolveWebMedia(url, env, origin, sessionMemo) {
       const display = displayMediaUrl(deviation.media || {});
       // 默认不抓原图：免费账号原图下载有日配额（403/429「Free download limit reached」），
       // 每次都先撞额度再回退既慢又吵。照片直接用最高清展示图（preview）；PREFER_ORIGINAL=1 才优先原图。
-      // 成熟作品已用 OAuth 取到未打码内容（matureOverrideOk）时，绝不能被网页的打码 preview 覆盖。
+      // 成熟作品已拿到未打码原图（matureOverrideOk：网页登录态的 baseUri，或 OAuth 官方图）时，
+      // 绝不能被网页的小 preview 覆盖。
       if (!preferOriginal(env) && !matureOverrideOk && item.kind === "photo" && display && display !== item.url) {
         item.url = display;
         item.kind = extensionKind(display) || "photo";
         dlog("media", `photo → 最高清展示图 dev=${target.id} url=${shortUrl(display)}`);
       }
       const extras = [];
-      // 成熟作品的附加页：匿名 init 下发的 token 带 blur>=10 声明、原始文件 403，
-      // 官方 OAuth API 又只返回主图 content（不含 additionalMedia）——附加页无论如何
-      // 都拿不到未打码版。与其发用户明确不要的打码图，不如跳过并计数，让上层提示
-      // 点「打开」去作品页看其余画面。
       const isMature = deviation?.isMature === true;
+      // 成熟作品附加页能否未打码，取决于是否带「网页登录 Cookie」请求 init：
+      //   - 有登录 Cookie（/login 一键登录拿到的 auth/auth_secure/userinfo）：init 下发的
+      //     additionalMedia token 即未打码原始文件，正常解析发送；
+      //   - 无登录 Cookie（匿名 / 仅 OAuth）：附加页 token 带 blur 声明、原始文件 403，
+      //     官方 OAuth API 又不返回 additionalMedia——拿不到未打码版，跳过并计数，
+      //     让上层提示去作品页看其余画面（而不是发用户明确不要的打码图）。
+      //     hasWebCookie 在上方主图判定处已定义。
       let skippedExtras = 0;
       // 多文件作品：其余画面在 init 响应的 deviation.extended.additionalMedia 里
       // （daviewer/dakit 同源结论），每项嵌套 Wix 媒体描述符；解析失败仅发主图。
       if (deviation?.isMultiMedia === true) {
         const raw = deviation?.extended?.additionalMedia;
-        if (isMature && Array.isArray(raw)) {
-          skippedExtras = raw.length;
-          dlog("media", `mature 附加页跳过 dev=${target.id} count=${skippedExtras}（附加页匿名仅打码、OAuth 无此字段）`);
+        if (shouldSkipMatureExtras({ isMature, hasWebCookie, raw })) {
+          skippedExtras = Array.isArray(raw) ? raw.length : 0;
+          dlog("media", `mature 附加页跳过 dev=${target.id} count=${skippedExtras}（无网页登录 Cookie：附加页匿名仅打码、OAuth 无此字段）`);
         } else {
           try {
             if (Array.isArray(raw)) {
@@ -1721,3 +1752,4 @@ function isHost(host, domain) {
 // 供 main.js 装配 AuthNotifier / OAuth 登录流程使用。
 export { telegram as sendTelegram };
 export { clearOAuthAccessToken } from "./auth/token.js";
+export { shouldSkipMatureExtras };

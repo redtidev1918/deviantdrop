@@ -10,34 +10,30 @@
 4. 初次环境配置需重建容器；之后管理员在 **Bot 私聊**发送 `/login`，打开 5 分钟一次性链接，在 DeviantArt 官方站授权。
 5. 回调校验 state、浏览器会话、PKCE；保存成功后立即生效，并发一次恢复通知。落盘失败不会显示成功。OAuth 协议见 [官方认证文档](https://deviantart.readme.io/docs/authentication)。
 
-### 只有公网 IP、没有域名（ssh 隧道登录）
+### 只有公网 IP、没有域名（电脑一键登录，推荐）
 
-DA 应用回调白名单已含 `http://127.0.0.1:8787/callback`（OAuth 对 localhost 允许 http），因此**无需**为登录开放任何公网端口、无需域名：
+无需开放任何公网端口、无需域名、无需手动复制 Cookie、无需重启。DA 应用回调白名单已含 `http://127.0.0.1:8787/callback`。在**你自己的电脑**上（需装有 Chrome/Edge，能访问 deviantart.com），于 DeviantDrop 目录运行：
 
-1. 确保 VPS 上 `.env` 有 `CLIENT_ID`/`CLIENT_SECRET`（凭据在容器里，脚本从 `.env` 读取）。
-2. 两个终端：
-   ```bash
-   # 终端 1：保持打开，建立隧道（把 VPS 的 8787 映射到本机 8787）
-   ssh -L 8787:127.0.0.1:8787 root@<VPS-IP>
-   # 终端 2：在 VPS 上启动登录服务（10 分钟内有效）
-   ssh root@<VPS-IP> 'cd /opt/deviantdrop && ./scripts/vps-login.sh'
-   ```
-3. 本机浏览器打开 `http://127.0.0.1:8787` → 自动跳到 DeviantArt 授权页 → 授权后重定向回 `127.0.0.1:8787/callback`（经隧道到达 VPS 的登录服务）→ refresh token 原子写入 `deviantdrop_cache` 卷的 `/data/auth/deviantart.json`，脚本自动 `chown 1000:1000` 并 `docker compose restart`，约 30 秒生效。
-4. 浏览器需能访问 deviantart.com（国内网络请给浏览器配代理）；授权页在 DeviantArt 官方站完成，应用不代替你登录。
+```bash
+VPS=root@<VPS-IP> npm run login        # 等价于 node scripts/dd-login.mjs
+```
 
-两种方式写的是同一份 `/data/auth/deviantart.json`，之后的轮换/失效处理完全一致。没有公网域名时 `/login` 内按钮与 `/d/:id` 预览页不启用（属可选功能），其余发送功能不受影响。
+脚本用 Chrome DevTools Protocol 驱动本机 Chrome：打开 DeviantArt 官方登录页，你登录并点「Authorize/允许」后，脚本在网络层同时捕获 ① OAuth 授权回调的 `code` 和 ② 网页登录 Cookie（`auth/auth_secure/userinfo`），经 ssh 推送到服务器，由 `scripts/dd-exchange.mjs` 用 `CLIENT_SECRET` 换 refresh token 并把 OAuth + Cookie 一起原子落盘，**立即热生效**。
 
-应用不能代替你在 DeviantArt 完成登录或同意授权。OAuth 也不能取得浏览器 Cookie。
+为什么在你电脑上跑浏览器而不是服务器：DA 登录页有 AWS WAF 人机校验（`detectIp`/`validateHostname`），令牌绑定浏览器自身环境；真实浏览器在**真实 DA 域**登录天然通过，而服务器反代登录页或服务器端无头浏览器都会被 WAF 拦、且低内存 VPS 不适合跑 Chromium。脚本零新增依赖（Node ≥22 自带 WebSocket/fetch），浏览器 profile 持久化在 `~/.config/deviantdrop/chrome-login-profile`，登录过 DA 后下次可免登录。
+
+- 链路：`dd-login.mjs`（本机）→ ssh → `scripts/dd-receive.sh`（VPS 宿主）→ `docker cp` + `dd-exchange.mjs`（容器内，以 node 用户写 `/data/auth`）。
+- 失败不污染凭据：兑换失败（如 code 过期）直接报错退出，不覆盖现有 token/Cookie。
+
+有公网域名时 `/login` 内按钮仅建立 OAuth；想让成熟作品的**附加页**也未打码，仍需网页登录态，请用上面的电脑一键登录。两种方式写的是同一份 `/data/auth/deviantart.json` 与 `deviantart-cookies.json`，轮换/失效处理一致。
+
+应用不能代替你在 DeviantArt 完成登录或同意授权——浏览器始终在真实 DA 站点完成登录，脚本只读取登录结果。
 
 反向代理应关闭 `/auth/` 的带 query access log，避免记录一次性 token/code；可用 `access_log off` 作用于该路径。本站认证响应 `no-store`、`no-referrer`，禁止 iframe。
 
-## Cookie 兼容与热更新
+## 未打码与网页登录态
 
-管理员私聊 `/cookies`，打开 5 分钟一次性管理链接，把自己浏览器的 `auth=...; auth_secure=...; userinfo=...` 填入表单并保存。提交校验 Origin 和一次性表单 token，Cookie 不经 Telegram 消息传递；保存为 0600 文件，无需 SSH/SCP 或重启。
-
-也可由受信任运维程序原子替换 Cookie JSON；读取时检查文件变化，新 session 按 Cookie 指纹隔离，旧 session 不会覆盖新 Cookie。明确 401/登录跳转才判定 Cookie 失效；403 或打码可能是权限/限额/出口问题，不会武断地清空 Cookie。失效通知按 OAuth/Cookie 分开冷却 6 小时。
-
-不会反向代理 DeviantArt 登录页，不安装 Playwright/Chromium。OAuth 与 Cookie 独立，更新 OAuth 不代表 Cookie 已恢复。
+成熟（Mature）作品：仅 OAuth 时官方 API 只返回主图、不返回多图附加页，匿名网页接口对原始文件返回 403/打码。**带网页登录 Cookie 请求 `_puppy/dadeviation/init` 时，附加页（`deviation.extended.additionalMedia`）下发的是未打码原始文件签名链接**——媒体下载本身走签名 CDN，无需再带 Cookie。因此一键登录同时建立 OAuth + 网页 Cookie 后，成熟多图作品的所有画面都会未打码发送；没有网页 Cookie 时附加页仍按原策略跳过并提示去作品页查看（不发打码图）。判定逻辑见 `shouldSkipMatureExtras`。
 
 ## 持久化与迁移
 
