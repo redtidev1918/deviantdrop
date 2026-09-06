@@ -11,7 +11,7 @@
 //   - poll    （默认）getUpdates 长轮询，无需公网入口/域名/证书；
 //   - webhook 本机起 HTTP 服务，需自行提供公网 HTTPS 反代并注册 setWebhook。
 import { createServer } from "node:http";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { Agent, ProxyAgent } from "undici";
@@ -83,6 +83,28 @@ if (!globalThis.caches) {
 
 const port = Number(process.env.PORT || 8080);
 const mode = (process.env.MODE || "poll").toLowerCase();
+
+// —— OAuth refresh token 持久化（参考 deviantart-downloader oauth.py 的 OAuthTokenStore）——
+// DA 的 refresh token 每次刷新都会轮换、旧值作废。轮换后的新 token 除了写进 cache.json，
+// 还落到独立文件 /data/refresh_token（0600），清缓存/重建卷后仍能续期，不会回到已作废的旧 token。
+const REFRESH_TOKEN_FILE = process.env.REFRESH_TOKEN_FILE || "/data/refresh_token";
+async function loadRefreshToken() {
+  try { return readFileSync(REFRESH_TOKEN_FILE, "utf8").trim(); } catch { return null; }
+}
+async function saveRefreshToken(token) {
+  try {
+    mkdirSync(dirname(REFRESH_TOKEN_FILE), { recursive: true });
+    const tmp = `${REFRESH_TOKEN_FILE}.tmp`;
+    writeFileSync(tmp, String(token), { mode: 0o600 });
+    renameSync(tmp, REFRESH_TOKEN_FILE);
+  } catch (error) {
+    console.error("refresh token 落盘失败:", error.message);
+  }
+}
+async function clearRefreshToken() {
+  try { writeFileSync(REFRESH_TOKEN_FILE, "", { mode: 0o600 }); } catch { /* 忽略 */ }
+}
+
 const env = {
   BOT_TOKEN: process.env.BOT_TOKEN,
   WEBHOOK_SECRET: process.env.WEBHOOK_SECRET,
@@ -91,6 +113,10 @@ const env = {
   CLIENT_SECRET: process.env.CLIENT_SECRET,
   DA_COOKIES: process.env.DA_COOKIES,
   DA_REFRESH_TOKEN: process.env.DA_REFRESH_TOKEN,
+  PREFER_ORIGINAL: process.env.PREFER_ORIGINAL,
+  loadRefreshToken,
+  saveRefreshToken,
+  clearRefreshToken,
 };
 for (const key of ["BOT_TOKEN", "WEBHOOK_SECRET"]) {
   if (!env[key]) {

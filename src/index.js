@@ -45,6 +45,16 @@ function extractPageUrl(caption) {
 function openButtonMarkup(pageUrl) {
   return pageUrl ? { reply_markup: { inline_keyboard: [[{ text: "在 DeviantArt 打开", url: pageUrl }]] } } : null;
 }
+// PREFER_ORIGINAL=1 才优先抓原图（默认关闭：免费账号原图有日配额，常 403/429）。
+function preferOriginal(env) {
+  return /^(1|true|yes)$/i.test(String(env?.PREFER_ORIGINAL || ""));
+}
+// DA 把失效/吊销的 refresh token 报成 invalid_request + "refresh_token is invalid"，
+// 而非 RFC 的 invalid_grant：归一化识别（参考 deviantart-downloader oauth.py）。
+function isInvalidRefreshToken(message) {
+  const normalized = String(message || "").replace(/_/g, " ").toLowerCase();
+  return normalized.includes("invalid_grant") || (normalized.includes("refresh") && normalized.includes("invalid"));
+}
 
 export default {
   async fetch(request, env) {
@@ -408,15 +418,17 @@ async function resolveWebMedia(url, env, origin, sessionMemo) {
       dlog("media", `dev=${target.id} mature=${deviation?.isMature === true} allowMature=${allowMature} webKind=${item.kind} webUrl=${shortUrl(item.url)} blur=${/blur_/.test(item.url || "")}`);
       // 成熟作品：用用户 OAuth 走官方接口取“未打码原图”，替代打码的网页预览
       let matureBlurred = false;
+      let matureOverrideOk = false;
       if (deviation?.isMature === true && env.DA_REFRESH_TOKEN) {
         const uuid = deviation?.extended?.deviationUuid;
         try {
           if (uuid) {
             const official = await officialApiGet(env, `deviation/${uuid}`);
-            const original = await pickOfficialMediaUrl(env, official, uuid);
+            const original = await pickOfficialMediaUrl(env, official, uuid, preferOriginal(env));
             if (original) {
               item.url = original;
               item.kind = extensionKind(original) || item.kind;
+              matureOverrideOk = true;
               dlog("media", `mature override OK dev=${target.id} uuid=${uuid} kind=${item.kind} url=${shortUrl(original)} blur=${/blur_/.test(original)}`);
             } else {
               matureBlurred = true;
@@ -432,6 +444,14 @@ async function resolveWebMedia(url, env, origin, sessionMemo) {
         }
       }
       const display = displayMediaUrl(deviation.media || {});
+      // 默认不抓原图：免费账号原图下载有日配额（403/429「Free download limit reached」），
+      // 每次都先撞额度再回退既慢又吵。照片直接用最高清展示图（preview）；PREFER_ORIGINAL=1 才优先原图。
+      // 成熟作品已用 OAuth 取到未打码内容（matureOverrideOk）时，绝不能被网页的打码 preview 覆盖。
+      if (!preferOriginal(env) && !matureOverrideOk && item.kind === "photo" && display && display !== item.url) {
+        item.url = display;
+        item.kind = extensionKind(display) || "photo";
+        dlog("media", `photo → 最高清展示图 dev=${target.id} url=${shortUrl(display)}`);
+      }
       const extras = [];
       // 多文件作品：其余画面在 init 响应的 deviation.extended.additionalMedia 里
       // （daviewer/dakit 同源结论），每项嵌套 Wix 媒体描述符；解析失败仅发主图。
@@ -516,7 +536,7 @@ async function resolveOfficialMedia(url, env, origin) {
   const target = parseDeviantArtTarget(url);
   const uuid = await resolveDeviationUuid(target, url, env);
   const deviation = await officialApiGet(env, `deviation/${uuid}`);
-  const mediaUrl = await pickOfficialMediaUrl(env, deviation, uuid);
+  const mediaUrl = await pickOfficialMediaUrl(env, deviation, uuid, preferOriginal(env));
   if (!mediaUrl) throw new Error("作品没有可用的公开媒体");
   const title = deviation?.title || "DeviantArt";
   const author = deviation?.author?.username;
@@ -630,9 +650,12 @@ async function getOfficialToken(env) {
   if (cached?.token) return cached.token;
   const endpoint = new URL(DA_TOKEN_URL);
   if (env.DA_REFRESH_TOKEN) {
-    // 用户 OAuth：refresh token 持久化 + 轮换，access 自动续期（登录一次，长期有效）
+    // 用户 OAuth：refresh token 每次刷新会轮换（旧值随即作废）。优先用「最近一次轮换后的值」：
+    // 缓存（内存/磁盘 cache.json）> 持久化文件（独立于 cache，避免清缓存后回到已作废的旧 token）> .env 初始值。
+    // 参考 deviantart-downloader oauth.py 的 OAuthTokenStore：轮换后把新 token 写回持久化存储。
     const rotated = await cacheGet("api", "refresh");
-    const refreshToken = rotated?.token || env.DA_REFRESH_TOKEN;
+    const fromFile = typeof env.loadRefreshToken === "function" ? await env.loadRefreshToken() : null;
+    const refreshToken = rotated?.token || fromFile || env.DA_REFRESH_TOKEN;
     endpoint.search = new URLSearchParams({
       grant_type: "refresh_token",
       refresh_token: refreshToken,
@@ -650,6 +673,12 @@ async function getOfficialToken(env) {
   const data = await response.json().catch(() => null);
   if (!response.ok || !data?.access_token) {
     const reason = data?.error_description || `HTTP ${response.status}`;
+    // 失效的 refresh token 不再可刷新：清掉缓存与持久化文件里的旧值，避免每次都拿已作废的 token 重试。
+    if (env.DA_REFRESH_TOKEN && isInvalidRefreshToken(reason)) {
+      await cacheSet("api", "refresh", null, 1);
+      if (typeof env.clearRefreshToken === "function") await env.clearRefreshToken();
+      dlog("oauth", `refresh token 已失效（${reason}），已清空本地持久化凭据，需重新登录`);
+    }
     throw new Error(
       env.DA_REFRESH_TOKEN
         ? `DeviantArt 登录已过期，请重新登录（${reason}）`
@@ -658,18 +687,19 @@ async function getOfficialToken(env) {
   }
   const ttl = Math.max(120, Number(data.expires_in ?? 3600) - 60);
   await cacheSet("api", "token", { token: data.access_token }, ttl);
-  // refresh token 若被轮换，持久化到缓存卷，后续刷新用新值
+  // refresh token 若被轮换：同时写缓存与独立持久化文件（缓存清空后仍能续期，不会回到已作废的旧 token）。
   if (data.refresh_token) {
     await cacheSet("api", "refresh", { token: data.refresh_token }, 30 * 24 * 3600);
+    if (typeof env.saveRefreshToken === "function") await env.saveRefreshToken(data.refresh_token);
   }
   return data.access_token;
 }
 
-// 媒体选择：优先官方原图下载端点（含 mp4/gif 原文件），失败回落到 content/preview 地址。
-async function pickOfficialMediaUrl(env, deviation, uuid) {
+// 媒体选择：默认用 content/preview（无需原图下载额度）；仅 PREFER_ORIGINAL=1 时才走原图下载端点。
+async function pickOfficialMediaUrl(env, deviation, uuid, wantOriginal = false) {
   const downloadable = deviation?.is_downloadable === true;
-  dlog("media", `official pick uuid=${uuid} downloadable=${downloadable} hasContent=${!!deviation?.content?.src} hasPreview=${!!deviation?.preview?.src} thumbs=${Array.isArray(deviation?.thumbs) ? deviation.thumbs.length : 0}`);
-  if (downloadable) {
+  dlog("media", `official pick uuid=${uuid} downloadable=${downloadable} wantOriginal=${wantOriginal} hasContent=${!!deviation?.content?.src} hasPreview=${!!deviation?.preview?.src} thumbs=${Array.isArray(deviation?.thumbs) ? deviation.thumbs.length : 0}`);
+  if (wantOriginal && downloadable) {
     try {
       const download = await officialApiGet(env, `deviation/download/${uuid}`);
       if (download?.src) return download.src;
