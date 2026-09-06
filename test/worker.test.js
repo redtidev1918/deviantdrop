@@ -130,13 +130,12 @@ test("resolves two links with one DeviantArt session and serves the signed proxy
   assert.equal(initCalls, 2);
   assert.equal(mediaCalls.length, 2);
   assert.match(mediaCalls[0].url, /sendVideo$/);
-  // caption 不再拼裸 URL：新排版含标题/作者，来源链接走 caption_entities 的 text_link。
+  // caption 只含标题/作者，不含裸 URL；单视频来源走 inline 按钮（webhook JSON 路径）。
   assert.match(mediaCalls[0].body.caption, /🎨 作品/);
   assert.match(mediaCalls[0].body.caption, /👤 artist/);
-  const entity = (mediaCalls[0].body.caption_entities || [])
-    .find((e) => e.type === "text_link" && /deviantart\.com\/artist\/art\/work-123456/.test(e.url));
-  assert.ok(entity, "caption_entities 应包含指向作品页的 text_link");
-  assert.equal(mediaCalls[0].body.caption.slice(entity.offset, entity.offset + entity.length), "DeviantArt");
+  assert.doesNotMatch(mediaCalls[0].body.caption, /https?:\/\//);
+  const btn = mediaCalls[0].body.reply_markup?.inline_keyboard?.[0]?.[0];
+  assert.ok(btn && /deviantart\.com\/artist\/art\/work-123456/.test(btn.url), "单视频应有指向作品页的 inline 按钮");
   const proxied = await worker.fetch(new Request(mediaCalls[0].body.video, {
     headers: { Range: "bytes=0-4" },
   }), env);
@@ -278,10 +277,10 @@ test("answers /about, parses media captions, and ignores link-less or own-forwar
   assert.equal(caption.downloads, 1);
   assert.equal(captionMedia.length, 1);
   assert.match(captionMedia[0].url, /sendPhoto$/);
-  // 来源链接走 caption_entities 的 text_link，不与文案粘连。
-  const cEntity = (captionMedia[0].body.caption_entities || [])
-    .find((e) => e.type === "text_link" && /deviantart\.com\/artist\/art\/work-123/.test(e.url));
-  assert.ok(cEntity, "caption_entities 应包含指向作品页的 text_link");
+  // 单图来源走 inline 按钮，caption 无裸 URL / entity。
+  assert.doesNotMatch(captionMedia[0].body.caption || "", /https?:\/\//);
+  const cBtn = captionMedia[0].body.reply_markup?.inline_keyboard?.[0]?.[0];
+  assert.ok(cBtn && /deviantart\.com\/artist\/art\/work-123/.test(cBtn.url), "单图应有指向作品页的 inline 按钮");
 
   // 无 caption 的图片：静默忽略。
   const plain = await send({
@@ -489,10 +488,9 @@ test("resolves artwork via official API and archive.org UUID mapping", async (t)
   const mediaCalls = calls.telegram.filter((c) => /send(Photo|Video|Animation)$/.test(c.url));
   assert.equal(mediaCalls.length, 2);
   assert.match(mediaCalls[0].url, /sendPhoto$/);
-  // 官方 API fallback 也用统一渲染：来源走 text_link entity，不与文案粘连。
-  const oEntity = (mediaCalls[0].body.caption_entities || [])
-    .find((e) => e.type === "text_link" && /deviantart\.com\/loish\/art\/underwater-913624585/.test(e.url));
-  assert.ok(oEntity, "官方 API fallback 应有指向作品页的 text_link");
+  // 官方 API fallback 也用统一渲染：单图来源走 inline 按钮，caption 无裸 URL。
+  const oBtn = mediaCalls[0].body.reply_markup?.inline_keyboard?.[0]?.[0];
+  assert.ok(oBtn && /deviantart\.com\/loish\/art\/underwater-913624585/.test(oBtn.url), "官方 fallback 应有指向作品页的 inline 按钮");
   assert.doesNotMatch(mediaCalls[0].body.caption, /https?:\/\//, "caption 不应包含裸 URL");
 });
 
@@ -673,9 +671,10 @@ test("poll uploads a photo/video album, preserves group topic, and replays all f
         const media = typeof body.media === 'string' ? JSON.parse(body.media) : body.media;
         assert.deepEqual(media.map(x => x.type), ['photo', 'video']);
         assert.equal(String(body.message_thread_id), '77');
-        // 相册（sendMediaGroup）不支持内联按钮：不得带 reply_markup；来源走 caption_entities。
+        // 相册（sendMediaGroup）不支持内联按钮，caption 也不放 entity（multipart offset bug）；
+        // 来源由发送后补发的一条 sendMessage 文本（text_link）承载。
         assert.equal(body.reply_markup, undefined, "相册不应带 reply_markup");
-        assert.ok(media[0].caption_entities?.some((e) => e.type === "text_link"), "相册首图 caption 应有 text_link entity");
+        assert.ok(!media[0].caption_entities, "相册首图 caption 不应带 entity");
         if (init.body instanceof FormData) {
           assert.equal(media[0].media, 'attach://file0');
           assert.equal(await body.file0.text(), 'file-bytes');
@@ -697,6 +696,9 @@ test("poll uploads a photo/video album, preserves group topic, and replays all f
   assert.equal(sends.filter(x => x.method === 'sendMediaGroup').length, 2);
   assert.equal(sends.filter(x => x.method === 'sendPhoto').length, 0);
   assert.equal(sends.filter(x => x.body.text?.includes('处理失败')).length, 0);
+  // 相册发完后补发一条可点来源文本（JSON sendMessage + text_link entity）。
+  const srcLine = sends.filter(x => x.method === 'sendMessage' && x.body.entities?.some(e => e.type === 'text_link' && /album-777777/.test(e.url)));
+  assert.equal(srcLine.length, 2, "每次相册发送都应补发一条来源文本");
 });
 
 test('poll single photo falls back on Telegram size error and channel posts are handled', async (t) => {
@@ -877,9 +879,10 @@ test('TelePress large-gallery hook publishes once, and failure leaves Telegram d
  const msg={from:{id:42},chat:{id:987,type:'private'},message_id:1,text:'https://www.deviantart.com/artist/art/gallery-7654321'};
  await handleUpdate({message:msg},env);await handleUpdate({message:msg},env);
  assert.equal(publications,1);assert.equal(albums,2);
- // TelePress 画廊入口作为可点击 text_link 文本消息发送（作品统一不再带冗余 inline 按钮）
+ // TelePress 画廊入口作为可点击 text_link 文本消息发送；相册自身不带按钮（sendMediaGroup 静默丢弃）。
  assert.ok(replies.some(r=>r.text?.includes('在 Telegraph 查看全部') && r.entities?.[0]?.url==='https://telegra.ph/gallery'));
- assert.ok(replies.every(r=>!r.reply_markup),'作品发送统一不带 inline 按钮');
+ // 相册发送后补发了可点来源文本（text_link 指向作品页）。
+ assert.ok(replies.some(r=>r.entities?.some(e=>e.type==='text_link' && /gallery-7654321/.test(e.url))),'相册应补发来源文本');
  fail=true;mem.clear();await handleUpdate({message:{...msg,chat:{id:986,type:'private'}}},env);
  assert.equal(albums,3);assert.ok(!replies.some(r=>r.text?.includes('处理失败')));
 });

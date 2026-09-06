@@ -59,7 +59,7 @@ access token 和 DA 网页 session 只放内存，旧通用缓存中的 token/se
 
 ## Telegram 排版与 TelePress
 
-所有原生媒体使用统一 caption；来源是 `caption_entities/text_link`，长标题截断也保留链接。压缩/预览/文档状态保留到 file_id 回放。单媒体有原站按钮；相册首图有来源 entity，不为单独放原站按钮额外发消息。11 张等尾部单图使用 sendPhoto，sendMediaGroup 始终为 2–10 项。
+媒体 caption 只放标题/作者/数量/状态，不含链接或 entity（multipart 上传端点对自定义 `caption_entities` 的 offset 处理有 bug，含 emoji 时高亮错位，2026-09 实测）。来源用**一个可靠、不重复的可点入口**：单图/单视频走 inline 按钮「🔗 在 DeviantArt 打开」（按钮在 JSON 传 URL / file_id 重放 / multipart 上传各路径都生效）；相册（`sendMediaGroup` 任何方式都静默丢弃按钮）则在发送后补发一条 JSON `sendMessage` 文本，来源用 `text_link`（JSON 路径 UTF-16 始终正确）。压缩/预览/文档状态随 file_id 重放保留；单文件重放带按钮、相册重放补发来源文本。>10 张的尾部单图用 sendPhoto，sendMediaGroup 始终 2–10 项。
 
 `TELEPRESS_URL` 未设置时无额外依赖。设置后默认 `TELEPRESS_MODE=fallback`；`large-gallery` 为纯图片 >10 张生成可选图集，`always` 仅明确选择时使用，`off` 完全关闭。视频/GIF 不转 Telegraph。缓存同作品 URL 90 天，重复使用，不反复创建页面。额外 Telegraph 入口才发送按钮消息；配置了公网预览域名时该消息的 link_preview_options 指向本站。
 

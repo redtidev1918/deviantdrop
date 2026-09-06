@@ -1,6 +1,6 @@
 const TELEGRAM_API = "https://api.telegram.org";
 const DEVIANTART = "https://www.deviantart.com/";
-import { renderArtworkCaption, sourceLinkEntity, buildCapFromMedia, normalizeEntitiesForMultipart } from "./rendering/caption.js";
+import { renderArtworkCaption, openButtonMarkup as buildOpenMarkup, sourceLineText, buildCapFromMedia } from "./rendering/caption.js";
 import { publishArtwork } from "./publishing/gallery.js";
 import { fetchPublicMedia } from "./preview/server.js";
 import { getOfficialToken, clearOAuthAccessToken } from "./auth/token.js";
@@ -41,6 +41,21 @@ function shortUrl(value) {
   const s = String(value || "");
   try { const u = new URL(s); return `${u.host}${u.pathname}`.slice(0, 90); } catch { return s.slice(0, 90); }
 }
+// 相册（多图）的来源入口：补发一条 JSON 文本，来源用 text_link（JSON 路径 UTF-16 可靠，
+// 绕开 multipart caption_entities 的 offset bug）。单图用 inline 按钮、不走这里。
+async function sendSourceLine(message, env, sourceUrl) {
+  if (!sourceUrl) return;
+  const { text, entities } = sourceLineText(sourceUrl);
+  if (!text) return;
+  await telegram(env, "sendMessage", {
+    chat_id: message.chat.id,
+    text,
+    entities,
+    reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+    ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
+  });
+}
+
 async function sendPublishedLink(message, env, id, sourceUrl, publishedUrl) {
   if (!publishedUrl) return;
   await telegram(env, "sendMessage", {
@@ -461,10 +476,13 @@ async function sendDeviantArt(url, message, env, origin, sessionMemo = {}, onSta
   const cached = await cacheGet("fid", `d2:${target.id}`);
   if (cached?.kind === "album" && Array.isArray(cached.files) && cached.files.length && cached.files.every((f) => f?.file_id)) {
     dlog("send", `replay album id=${target.id} files=${cached.files.length}`);
-    // 重放也用统一渲染：caption 无裸 URL，来源用 text_link；相册另补发入口消息。
     const { capTitle, capAuthor } = splitTitleAuthor(cached.title);
     const replayCap = cached.cap ? { ...cached.cap, sourceUrl: url.href } : capObject({ title: capTitle, author: capAuthor, sourceUrl: url.href, mediaCount: cached.files.length });
+    const hadAlbum = cached.files.some((f) => f.kind === "photo" || f.kind === "video");
+    const onlyOneDoc = !hadAlbum && cached.files.length === 1;
     await sendAlbumByFileIds(cached.files, "", message, env, replayCap);
+    // 相册（含混合文档）补发可点来源文本；纯单文档由 sendFileById 的按钮承载，不重复。
+    if (!onlyOneDoc) await sendSourceLine(message, env, url.href);
     return;
   }
   if (cached?.file_id && cached.kind) {
@@ -490,12 +508,16 @@ async function sendDeviantArt(url, message, env, origin, sessionMemo = {}, onSta
     if(items.length>1 && items.every(i=>i.kind==='photo'||i.kind==='video')) {
       const results=[];
       for(let i=0;i<items.length;i+=10) results.push(...await sendAlbum(items.slice(i,i+10),'',message,env,!origin,onStatus,cap));
+      // 相册无法带 inline 按钮：发完补发一条可点来源文本（JSON text_link，UTF-16 可靠）。
+      await sendSourceLine(message, env, url.href);
       if(items.length<=10)await rememberAlbumFileIds(target.id,media.title,results,env,cap);
     } else {
       for(const item of items){
         const result=await sendOne(item.kind,item.url,'',message,env,!origin,onStatus,item.display,cap);
         if(items.length===1)await rememberFileId(target.id,item.kind,media.title,result,env,cap);
       }
+      // 单图/单视频/文档：按钮已随媒体发出；混合多文件（照片+文档）按钮可能缺失，补一条来源文本兜底。
+      if(items.length>1) await sendSourceLine(message, env, url.href);
     }
   } catch(error) {
     const published=await publishArtwork(env,target.id,media,url.href,true);
@@ -856,7 +878,8 @@ async function sendOne(kind, mediaUrl, caption, message, env, upload = false, on
   if (!fields) throw new Error("不支持的媒体类型");
   const rendered = renderArtworkCaption(cap, cap.status || {});
   const text = rendered.text.slice(0, 1024);
-  const entities = cap ? [sourceLinkEntity(text, cap.sourceUrl)].filter(Boolean) : [];
+  // 单图来源用 inline 按钮（各传输路径都可靠）；caption 不放 entity（避免 multipart offset bug）。
+  const markup = buildOpenMarkup(cap?.sourceUrl);
   if (upload) {
     // 轮询模式：Telegram 服务器拉不动 wixmp（需 Referer/UA），由 Bot 先下载再上传。
     return uploadMedia(env, kind, mediaUrl, text, message, onStatus, fallbackUrl, cap);
@@ -864,8 +887,8 @@ async function sendOne(kind, mediaUrl, caption, message, env, upload = false, on
   const baseBody = {
     chat_id: message.chat.id,
     caption: text,
-    ...(entities.length ? { caption_entities: entities } : {}),
     reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+    ...(markup ? { reply_markup: markup } : {}),
     ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
   };
   try {
@@ -876,7 +899,6 @@ async function sendOne(kind, mediaUrl, caption, message, env, upload = false, on
       const [docMethod, docField] = MEDIA_FIELDS.document;
       cap.status = { ...cap.status, docFallback: true };
       baseBody.caption = renderArtworkCaption(cap, cap.status).text;
-      baseBody.caption_entities = [sourceLinkEntity(baseBody.caption, cap.sourceUrl)].filter(Boolean);
       return telegram(env, docMethod, { [docField]: mediaUrl, ...baseBody });
     }
     throw error;
@@ -897,14 +919,15 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null, 
     return text;
   };
   const baseText = renderCapNow();
-  const capEntities = cap ? [sourceLinkEntity(baseText, cap.sourceUrl)].filter(Boolean) : [];
+  // 相册 caption 不放来源链接（multipart 有 offset bug，且相册带不了按钮）；
+  // 来源由上层 sendSourceLine 补发的 JSON 文本消息承载。
   if (!upload) {
     const result = await telegram(env, "sendMediaGroup", {
       chat_id: message.chat.id,
       media: items.map((item, index) => ({
         type: typeOf[item.kind] || "photo",
         media: item.url,
-        ...(index === 0 ? { caption: baseText, ...(capEntities.length ? { caption_entities: capEntities } : {}) } : {}),
+        ...(index === 0 ? { caption: baseText } : {}),
       })),
       reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
       ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
@@ -989,13 +1012,12 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null, 
   if (docFalls.length) status.docFallback = true;
   cap.status = { ...(cap.status || {}), ...status };
   const fullCaption = renderCapNow();
-  const fullEntities = [sourceLinkEntity(fullCaption, cap.sourceUrl)].filter(Boolean);
+  const openMarkup = buildOpenMarkup(cap?.sourceUrl);
   const results = [];
   const mediaForm = () => {
     const form = new FormData();
     form.set("chat_id", String(message.chat.id));
     form.set("reply_parameters", JSON.stringify({ message_id: message.message_id, allow_sending_without_reply: true }));
-    // 相册不支持 inline 按钮（sendMediaGroup 静默丢弃），不要发 reply_markup。
     if (message.message_thread_id) form.set("message_thread_id", String(message.message_thread_id));
     return form;
   };
@@ -1006,11 +1028,7 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null, 
       form.set("media", JSON.stringify(entries.map((entry, i) => ({
         type: entry.kind,
         media: `attach://file${i}`,
-        ...(i === 0 ? {
-          caption: fullCaption,
-          // multipart 端点按 code point 校验实体偏移（见 caption.js toMultipartEntities）
-          ...(fullEntities.length ? { caption_entities: normalizeEntitiesForMultipart(fullCaption, fullEntities) } : {}),
-        } : {}),
+        ...(i === 0 ? { caption: fullCaption } : {}),
       }))));
       entries.forEach(({ bytes, extension }, i) => {
         form.set(`file${i}`, new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `file${i}.${extension}`);
@@ -1025,7 +1043,8 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null, 
     results.push(await telegramForm(env, method, () => {
       const f = mediaForm();
       f.set("caption", fullCaption);
-      if (fullEntities.length) f.set("caption_entities", JSON.stringify(normalizeEntitiesForMultipart(fullCaption, fullEntities)));
+      // 单张（其余降级文档）可带 inline 来源按钮。
+      if (openMarkup) f.set("reply_markup", JSON.stringify(openMarkup));
       f.set(field, new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `${field}.${extension}`);
       return f;
     }));
@@ -1035,7 +1054,8 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null, 
     results.push(await telegramForm(env, "sendDocument", () => {
       const f = mediaForm();
       f.set("caption", fullCaption);
-      if (fullEntities.length) f.set("caption_entities", JSON.stringify(normalizeEntitiesForMultipart(fullCaption, fullEntities)));
+      // 整组都是文档（entries 为空）时给文档带上来源按钮；相册内混排的文档不带（相册另补发来源文本）。
+      if (openMarkup && entries.length === 0) f.set("reply_markup", JSON.stringify(openMarkup));
       f.set("document", new Blob([doc.bytes], { type: "application/octet-stream" }), `original.${doc.extension}`);
       return f;
     }));
@@ -1065,24 +1085,20 @@ async function sendAlbumByFileIds(files, caption, message, env, cap = null) {
   const typeOf = { photo: "photo", video: "video" };
   const rendered = renderArtworkCaption(cap, cap.status || {});
   const firstCaption = rendered.text.slice(0, 1024);
-  const entities = cap ? [sourceLinkEntity(firstCaption, cap.sourceUrl)].filter(Boolean) : [];
   if (albumable.length) {
-    // sendMediaGroup 是 JSON 请求（file_id 直传，无 multipart），实体 offset 按 UTF-16 即可。
+    // 相册带不了按钮、caption 不放 entity；来源由上层 sendSourceLine 补发文本承载。
     await telegram(env, "sendMediaGroup", {
       chat_id: message.chat.id,
       media: albumable.map((file, index) => ({
         type: typeOf[file.kind] || "photo",
         media: file.file_id,
-        ...(index === 0 ? {
-          caption: firstCaption,
-          ...(entities.length ? { caption_entities: entities } : {}),
-        } : {}),
+        ...(index === 0 ? { caption: firstCaption } : {}),
       })),
       reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
       ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
     });
   }
-  // 文档（压缩失败的超大原图）单独重发：第一条带 caption + 来源按钮。
+  // 文档（压缩失败的超大原图）单独重发：第一条带来源按钮。
   for (let i = 0; i < standalone.length; i += 1) {
     const f = standalone[i];
     if (f.kind === "document") {
@@ -1093,19 +1109,19 @@ async function sendAlbumByFileIds(files, caption, message, env, cap = null) {
   }
 }
 
-// 用已缓存 file_id 直接重发（不再下载，Telegram 服务端去重）。
+// 用已缓存 file_id 直接重发（不再下载，Telegram 服务端去重）。单条来源用 inline 按钮。
 async function sendFileById(kind, fileId, caption, message, env, cap = null) {
   const fields = MEDIA_FIELDS[kind];
   if (!fields) throw new Error("不支持的媒体类型");
   const rendered = renderArtworkCaption(cap, cap.status || {});
   const text = rendered.text.slice(0, 1024);
-  const entities = cap ? [sourceLinkEntity(text, cap.sourceUrl)].filter(Boolean) : [];
+  const markup = buildOpenMarkup(cap?.sourceUrl);
   await telegram(env, fields[0], {
     chat_id: message.chat.id,
     [fields[1]]: fileId,
     caption: text,
-    ...(entities.length ? { caption_entities: entities } : {}),
     reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+    ...(markup ? { reply_markup: markup } : {}),
     ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
   });
 }
@@ -1181,7 +1197,6 @@ async function uploadMedia(env, kind, mediaUrl, caption, message, onStatus = nul
   // 收集状态后一次渲染。
   const capStatus = { ...(cap?.status || {}) };
   let captionText = caption;
-  let captionEntities = [];
   // 照片超过阈值：优先压缩成可内嵌预览的照片发（Telegram 显示为图片）；压缩不可用才转文档
   if (kind === "photo" && bytes.length > PHOTO_MAX_BYTES) {
     if (onStatus) await onStatus("原图较大，正在压缩…");
@@ -1203,13 +1218,14 @@ async function uploadMedia(env, kind, mediaUrl, caption, message, onStatus = nul
   }
   cap.status = capStatus;
   captionText = renderArtworkCaption(cap, capStatus).text;
-  captionEntities = [sourceLinkEntity(captionText, cap.sourceUrl)].filter(Boolean);
+  // 单文件上传：来源用 inline 按钮（multipart 可靠）；caption 不放 entity（offset bug）。
+  const openMarkup = buildOpenMarkup(cap?.sourceUrl);
   const makeForm = (field) => {
     const form = new FormData();
     form.set("chat_id", String(message.chat.id));
     form.set("caption", captionText);
-    if (captionEntities.length) form.set("caption_entities", JSON.stringify(normalizeEntitiesForMultipart(captionText, captionEntities)));
     form.set("reply_parameters", JSON.stringify({ message_id: message.message_id, allow_sending_without_reply: true }));
+    if (openMarkup) form.set("reply_markup", JSON.stringify(openMarkup));
     if (message.message_thread_id) form.set("message_thread_id", String(message.message_thread_id));
     form.set(field, new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `${field}.${extension}`);
     return form;
@@ -1221,11 +1237,7 @@ async function uploadMedia(env, kind, mediaUrl, caption, message, onStatus = nul
   } catch (error) {
     // 照片（含压缩后）仍被拒时再按文档试一次
     if (kind === "photo" && isTooBigError(error)) {
-      if (cap) {
-        cap.status = { ...cap.status, docFallback: true };
-        captionText = renderArtworkCaption(cap, cap.status).text;
-        captionEntities = [sourceLinkEntity(captionText, cap.sourceUrl)].filter(Boolean);
-      }
+      if (cap) cap.status = { ...cap.status, docFallback: true };
       return telegramForm(env, MEDIA_FIELDS.document[0], () => makeForm("document"));
     }
     throw error;

@@ -1,18 +1,23 @@
-// 统一的作品 caption / 按钮渲染。
+// 统一的作品 caption / 来源渲染。
 //
-// 设计：作品来源只通过「一个可点击的 caption 链接」呈现，全场景一致（单图/相册/
-// 上传/重放/转发）。不再配 inline 键盘按钮——原因：①相册 sendMediaGroup 不支持
-// inline 按钮，单图却支持，两者不一致；②按钮和 caption 链接指向同一 URL，并存是
-// 冗余；③caption 链接随消息转发、不会丢失。可点文字是「在 DeviantArt 打开」里的
-// DeviantArt，边界由 text_link entity 的 offset/length 精确控制，caption 里无裸 URL。
+// 设计：媒体消息的 caption 只放标题/作者/数量/状态，**不放来源链接、不放 entity**。
+// 来源用「一个可靠、可点击的入口」单独承载，且每个作品只有一个、绝不重复：
+//   - 单图/单视频：inline 键盘按钮「🔗 在 DeviantArt 打开」。按钮在所有路径
+//     （JSON 传 URL、file_id 重放、multipart 上传/文档降级）都可靠生效。
+//   - 相册（多图）：Telegram 的 sendMediaGroup（无论 JSON 还是 multipart、无论顶层
+//     还是条目级 reply_markup）都会静默丢弃按钮，所以相册发完后**补发一条 JSON
+//     sendMessage 文本**，来源用 text_link 承载。
+//     —— 必须是独立 JSON 文本消息：multipart 上传端点对自定义 caption_entities 的
+//     offset/length 处理有 bug（按 code point 收、却按 UTF-16/字节存，含 emoji 时
+//     高亮错位，实测 2026-09），而 JSON sendMessage 的 text_link entity（UTF-16）始终正确。
 
 const CAPTION_LIMIT = 1024;
 
-// 可点文字（text_link 覆盖的标签）。渲染与 entity 计算共用同一常量，保证边界一致。
+// 可点文字 / 按钮里的标签。
 export const SOURCE_LABEL = "DeviantArt";
+export const SOURCE_BUTTON_TEXT = "🔗 在 DeviantArt 打开";
 
-// 把作品元数据 + 状态说明渲染成 Telegram caption 文本（不含裸 URL）。
-// 返回 { text }。来源链接由 sourceLinkEntity 另行计算（multipart/JSON 通用）。
+// 媒体 caption（无来源、无 entity，避免 multipart offset bug）。返回 { text }。
 export function renderArtworkCaption(meta = {}, status = {}) {
   const lines = [];
   const title = (meta.title || "DeviantArt 作品").trim();
@@ -27,26 +32,28 @@ export function renderArtworkCaption(meta = {}, status = {}) {
   if (status.previewOnly) notes.push("原图暂不可用，已使用高清展示图");
   if (status.docFallback) notes.push("图片过大，已作为文件发送");
   if (notes.length) lines.push(`⚠️ ${notes.join("；")}`);
-  // 来源行：其中的「DeviantArt」会被 text_link entity 指向作品页（见 sourceLinkEntity）。
-  const source = `\n\n🔗 在 ${SOURCE_LABEL} 打开`;
-  const body = lines.join("\n").slice(0, CAPTION_LIMIT - source.length).replace(/[\uD800-\uDBFF]$/, "");
-  return { text: body + source };
+  const body = lines.join("\n").slice(0, CAPTION_LIMIT).replace(/[\uD800-\uDBFF]$/, "");
+  return { text: body };
 }
 
-// 计算来源行「DeviantArt」文字的 text_link entity（offset 按 UTF-16 code unit，Telegram 规范）。
-export function sourceLinkEntity(captionText, sourceUrl) {
-  if (!sourceUrl) return null;
-  const idx = captionText.lastIndexOf(SOURCE_LABEL);
-  if (idx < 0) return null;
-  return { type: "text_link", offset: idx, length: SOURCE_LABEL.length, url: sourceUrl };
-}
-
-// 单媒体的 inline 键盘（相册 sendMediaGroup 会静默丢弃，不要给相册用）。
-// 仅非媒体消息（如 Telegraph 兜底入口）按需使用；普通作品发送统一用 caption 链接、不带按钮。
+// 单媒体的 inline 键盘（仅单图/单视频用；相册会被静默丢弃，相册改走补发文本）。
+// 也用于非媒体消息（如 Telegraph 兜底入口）。
 export function openButtonMarkup(sourceUrl, extraButtons = []) {
   if (!sourceUrl) return undefined;
-  const row = [{ text: "在 DeviantArt 打开", url: sourceUrl }, ...extraButtons];
+  const row = [{ text: SOURCE_BUTTON_TEXT, url: sourceUrl }, ...extraButtons];
   return { inline_keyboard: [row] };
+}
+
+// 相册用：补发的一条可点击来源文本（JSON sendMessage，text_link 按 UTF-16 始终正确）。
+// 返回 { text, entities }。文本短，只含一个 emoji（🔗，单个代理对，无 offset 歧义）。
+export function sourceLineText(sourceUrl) {
+  if (!sourceUrl) return { text: "", entities: [] };
+  const text = SOURCE_BUTTON_TEXT; // 「🔗 在 DeviantArt 打开」
+  const idx = text.lastIndexOf(SOURCE_LABEL);
+  return {
+    text,
+    entities: [{ type: "text_link", offset: idx, length: SOURCE_LABEL.length, url: sourceUrl }],
+  };
 }
 
 // 把 resolveWebMedia 的 media 对象 + 作品页 URL 归一化成发送函数使用的 cap：
@@ -77,25 +84,32 @@ export function renderCap(cap, statusOverride = {}) {
   return { text, entities: entity ? [entity] : [] };
 }
 
-// Telegram 官方 MessageEntity 的 offset/length 语义是 UTF-16 code unit，sourceLinkEntity
-// 产出的正是标准 UTF-16 entity，JSON Bot API 请求应原样发送。
+// Telegram MessageEntity 的 offset/length 在 JSON Bot API 请求里按 UTF-16 code unit；
+// sourceLinkEntity 产出的正是标准 UTF-16 entity，JSON 请求（sendPhoto/sendMediaGroup 传 URL
+// 或 file_id）原样发送。
 //
-// 但线上实测发现 Bot API 的 multipart 上传端点（sendPhoto/sendMediaGroup 带 attach:// 文件，
-// caption 走 form-data 字段）对实体偏移按 Unicode code point 校验：同一 caption（含 emoji/
-// 中文），JSON 用 UTF-16 offset 成功，multipart 用同一 offset 报 "entity begins in a middle
-// of a UTF-16 symbol"。这是实测出来的 transport 兼容行为（不是对协议的重新定义），所以只在
-// multipart 路径做一次归一化：把 UTF-16 offset/length 换算成 code point。
+// 但 multipart 上传端点（sendPhoto/sendMediaGroup/sendDocument 带 attach:// 文件，
+// caption 走 form-data 字段）实测按 **Unicode code point** 解释 offset/length，服务端
+// 再转回 UTF-16 存储。线上实测（2026-09，读回 sendDocument 的 caption_entities 验证）：
+//   - 发 UTF-16 偏移：落在多字节字符中间 → 400 "entity begins in a middle of a
+//     UTF-16 symbol at byte offset N"；
+//   - 发 UTF-8 字节偏移：400 "ends after the end of the text"（字节数 > UTF-16 长度）；
+//   - 发 code-point 偏移：200 接受，读回的 offset = 发送值 − 标签前代理对(emoji)数，
+//     length = 标签码点数，切片正好是 "DeviantArt"。
+// 所以 multipart 路径必须把 UTF-16 的 offset/length 换算成 code point。
 // 若将来 Telegram 修复该差异，删掉此层即可，JSON 路径不受影响。
 export function normalizeEntitiesForMultipart(text, entities) {
   if (!entities?.length) return entities || [];
+  const cp = [...text];
   return entities.map((entity) => {
     if (entity.offset == null) return entity;
-    const before = text.slice(0, entity.offset);
-    const segment = entity.length != null ? text.slice(entity.offset, entity.offset + entity.length) : "";
+    // text.slice 按 UTF-16 单位切；再展开成 code point 计数。
+    const beforeCp = [...text.slice(0, entity.offset)].length;
+    const segmentCp = entity.length != null ? [...text.slice(entity.offset, entity.offset + entity.length)].length : null;
     return {
       ...entity,
-      offset: [...before].length,
-      length: entity.length != null ? [...segment].length : entity.length,
+      offset: beforeCp,
+      length: segmentCp != null ? segmentCp : entity.length,
     };
   });
 }
