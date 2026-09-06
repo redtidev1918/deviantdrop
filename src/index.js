@@ -51,6 +51,8 @@ async function sendSourceLine(message, env, sourceUrl) {
     chat_id: message.chat.id,
     text,
     entities,
+    // text_link 在部分客户端会展开成链接预览，占地方；来源只是个入口，显式关闭预览。
+    link_preview_options: { is_disabled: true },
     reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
     ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
   });
