@@ -41,9 +41,9 @@ docker compose up -d --build
 
 ### 回复排版
 
-- 统一排版：`🎨 标题 / 👤 作者 / 🖼 N 个媒体 / ⚠️ 状态说明 / 🔗 来源：DeviantArt`。
-- caption 里**不再放裸 URL**：来源链接通过 `caption_entities` 的 `text_link` 精确挂在「DeviantArt」上，中文括号/说明文字不会再破坏链接。
-- 单条媒体带「在 DeviantArt 打开」内联按钮；相册（sendMediaGroup 不支持按钮）首图用 text_link，不再额外为发链接而补发消息。
+- 统一排版：`🎨 标题 / 👤 作者 / 🖼 N 个媒体`，外加一个可靠的来源入口（见下）。
+- 来源入口**每个作品只有一个、绝不重复**：单图/视频是图片下方的「🔗 在 DeviantArt 打开」内联按钮（按钮在 URL 直传 / file_id 重放 / multipart 上传各路径都可靠）；相册（sendMediaGroup 会静默丢弃按钮）在相册发出后**补发一行**可点击的「🔗 在 DeviantArt 打开」文本，不展开链接预览。
+- 技术性状态提示（`⚠️ 已压缩 / 原图暂不可用 / 已作为文件发送` 等）默认只在**私聊**显示便于运营排查；群聊/频道里自动隐藏（对看图的人是噪音，想看原图点来源入口即可）。可用环境变量强制：`CAPTION_NOTES=auto`（默认，私聊显示/群聊隐藏）、`always`（总是显示）、`never`（总是隐藏）。
 
 ### TelePress（可选）
 

@@ -65,3 +65,17 @@ test("长标题 caption 截断到 1024 以内", () => {
   const { text } = renderArtworkCaption({ title: "😀".repeat(1000) });
   assert.ok(text.length <= 1024);
 });
+
+test("技术性 ⚠️ 提示：showNotes=true 显示，false 省略", () => {
+  const status = { compressed: true, previewOnly: true };
+  const withNotes = renderArtworkCaption({ title: "T", author: "A" }, status, { showNotes: true }).text;
+  const withoutNotes = renderArtworkCaption({ title: "T", author: "A" }, status, { showNotes: false }).text;
+  assert.match(withNotes, /⚠️/);
+  assert.match(withNotes, /已压缩发送/);
+  assert.doesNotMatch(withoutNotes, /⚠️/);
+  assert.doesNotMatch(withoutNotes, /已压缩发送/);
+  assert.doesNotMatch(withoutNotes, /原图暂不可用/);
+  // 标题/作者仍保留
+  assert.match(withoutNotes, /🎨 T/);
+  assert.match(withoutNotes, /👤 A/);
+});

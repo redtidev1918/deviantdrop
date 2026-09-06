@@ -18,7 +18,9 @@ export const SOURCE_LABEL = "DeviantArt";
 export const SOURCE_BUTTON_TEXT = "🔗 在 DeviantArt 打开";
 
 // 媒体 caption（无来源、无 entity，避免 multipart offset bug）。返回 { text }。
-export function renderArtworkCaption(meta = {}, status = {}) {
+// opts.showNotes=false 时省略技术性 ⚠️ 提示（压缩/打码/原图不可用/转文件）：
+// 这些对运营者排查有用，对群里看图的人是噪音，群聊默认不显示（见 index.js 的 captionNotesEnabled）。
+export function renderArtworkCaption(meta = {}, status = {}, { showNotes = true } = {}) {
   const lines = [];
   const title = (meta.title || "DeviantArt 作品").trim();
   lines.push(`🎨 ${title}`);
@@ -26,12 +28,14 @@ export function renderArtworkCaption(meta = {}, status = {}) {
   if (Number.isInteger(meta.mediaCount) && meta.mediaCount > 1) {
     lines.push(`🖼 ${meta.mediaCount} 个媒体`);
   }
-  const notes = [];
-  if (status.compressed) notes.push("部分图片超过 10MB，已压缩发送");
-  if (status.blurredPreview) notes.push("部分成熟内容无法获取未打码画面，请在原站查看");
-  if (status.previewOnly) notes.push("原图暂不可用，已使用高清展示图");
-  if (status.docFallback) notes.push("图片过大，已作为文件发送");
-  if (notes.length) lines.push(`⚠️ ${notes.join("；")}`);
+  if (showNotes) {
+    const notes = [];
+    if (status.compressed) notes.push("部分图片超过 10MB，已压缩发送");
+    if (status.blurredPreview) notes.push("部分成熟内容无法获取未打码画面，请在原站查看");
+    if (status.previewOnly) notes.push("原图暂不可用，已使用高清展示图");
+    if (status.docFallback) notes.push("图片过大，已作为文件发送");
+    if (notes.length) lines.push(`⚠️ ${notes.join("；")}`);
+  }
   const body = lines.join("\n").slice(0, CAPTION_LIMIT).replace(/[\uD800-\uDBFF]$/, "");
   return { text: body };
 }
@@ -72,46 +76,3 @@ export function buildCapFromMedia(media, sourceUrl) {
     text: null,
   };
 }
-
-// 用 cap 直接产出 { text, entities }（渲染 + entity 一次完成）。
-export function renderCap(cap, statusOverride = {}) {
-  const status = { ...(cap.status || {}), ...statusOverride };
-  const { text } = renderArtworkCaption(
-    { title: cap.title, author: cap.author, mediaCount: cap.mediaCount },
-    status,
-  );
-  const entity = sourceLinkEntity(text, cap.sourceUrl);
-  return { text, entities: entity ? [entity] : [] };
-}
-
-// Telegram MessageEntity 的 offset/length 在 JSON Bot API 请求里按 UTF-16 code unit；
-// sourceLinkEntity 产出的正是标准 UTF-16 entity，JSON 请求（sendPhoto/sendMediaGroup 传 URL
-// 或 file_id）原样发送。
-//
-// 但 multipart 上传端点（sendPhoto/sendMediaGroup/sendDocument 带 attach:// 文件，
-// caption 走 form-data 字段）实测按 **Unicode code point** 解释 offset/length，服务端
-// 再转回 UTF-16 存储。线上实测（2026-09，读回 sendDocument 的 caption_entities 验证）：
-//   - 发 UTF-16 偏移：落在多字节字符中间 → 400 "entity begins in a middle of a
-//     UTF-16 symbol at byte offset N"；
-//   - 发 UTF-8 字节偏移：400 "ends after the end of the text"（字节数 > UTF-16 长度）；
-//   - 发 code-point 偏移：200 接受，读回的 offset = 发送值 − 标签前代理对(emoji)数，
-//     length = 标签码点数，切片正好是 "DeviantArt"。
-// 所以 multipart 路径必须把 UTF-16 的 offset/length 换算成 code point。
-// 若将来 Telegram 修复该差异，删掉此层即可，JSON 路径不受影响。
-export function normalizeEntitiesForMultipart(text, entities) {
-  if (!entities?.length) return entities || [];
-  const cp = [...text];
-  return entities.map((entity) => {
-    if (entity.offset == null) return entity;
-    // text.slice 按 UTF-16 单位切；再展开成 code point 计数。
-    const beforeCp = [...text.slice(0, entity.offset)].length;
-    const segmentCp = entity.length != null ? [...text.slice(entity.offset, entity.offset + entity.length)].length : null;
-    return {
-      ...entity,
-      offset: beforeCp,
-      length: segmentCp != null ? segmentCp : entity.length,
-    };
-  });
-}
-// 兼容别名（v1.5.1 之前的导出名，避免外部/历史引用破裂）。
-export const toMultipartEntities = normalizeEntitiesForMultipart;

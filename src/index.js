@@ -73,6 +73,15 @@ async function sendPublishedLink(message, env, id, sourceUrl, publishedUrl) {
 function preferOriginal(env) {
   return /^(1|true|yes)$/i.test(String(env?.PREFER_ORIGINAL || ""));
 }
+// 技术性 ⚠️ 提示（压缩/打码/原图不可用/转文件）是否显示在 caption 里。
+// 默认 auto：私聊（自己/运营排查）显示，群聊/频道（看图的人）隐藏——对他们是噪音，
+// 且已有「在 DeviantArt 打开」入口可去看原图。CAPTION_NOTES=always/never 强制覆盖。
+function captionNotesEnabled(env, message) {
+  const mode = String(env?.CAPTION_NOTES || "auto").trim().toLowerCase();
+  if (mode === "always" || /^(1|true|yes)$/.test(mode)) return true;
+  if (mode === "never" || /^(0|false|no|off)$/.test(mode)) return false;
+  return message?.chat?.type === "private";
+}
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -878,7 +887,8 @@ async function pickOfficialMediaUrl(env, deviation, uuid, wantOriginal = false) 
 async function sendOne(kind, mediaUrl, caption, message, env, upload = false, onStatus = null, fallbackUrl = null, cap = null) {
   const fields = MEDIA_FIELDS[kind];
   if (!fields) throw new Error("不支持的媒体类型");
-  const rendered = renderArtworkCaption(cap, cap.status || {});
+  const showNotes = captionNotesEnabled(env, message);
+  const rendered = renderArtworkCaption(cap, cap.status || {}, { showNotes });
   const text = rendered.text.slice(0, 1024);
   // 单图来源用 inline 按钮（各传输路径都可靠）；caption 不放 entity（避免 multipart offset bug）。
   const markup = buildOpenMarkup(cap?.sourceUrl);
@@ -900,7 +910,7 @@ async function sendOne(kind, mediaUrl, caption, message, env, upload = false, on
     if (kind === "photo" && isTooBigError(error)) {
       const [docMethod, docField] = MEDIA_FIELDS.document;
       cap.status = { ...cap.status, docFallback: true };
-      baseBody.caption = renderArtworkCaption(cap, cap.status).text;
+      baseBody.caption = renderArtworkCaption(cap, cap.status, { showNotes }).text;
       return telegram(env, docMethod, { [docField]: mediaUrl, ...baseBody });
     }
     throw error;
@@ -912,11 +922,13 @@ async function sendOne(kind, mediaUrl, caption, message, env, upload = false, on
 async function sendAlbum(items, caption, message, env, upload, onStatus = null, cap = null) {
   if (items.length === 1) return [await sendOne(items[0].kind, items[0].url, caption, message, env, upload, onStatus, items[0].display, cap)];
   const typeOf = { photo: "photo", video: "video", animation: "animation" };
+  const showNotes = captionNotesEnabled(env, message);
   // 所有发送路径共用结构化 caption。
   const renderCapNow = () => {
     const { text } = renderArtworkCaption(
       { title: cap.title, author: cap.author, mediaCount: cap.mediaCount },
       cap.status || {},
+      { showNotes },
     );
     return text;
   };
@@ -1085,7 +1097,7 @@ async function sendAlbumByFileIds(files, caption, message, env, cap = null) {
   const albumable = files.filter((f) => f.kind === "photo" || f.kind === "video");
   const standalone = files.filter((f) => !(f.kind === "photo" || f.kind === "video"));
   const typeOf = { photo: "photo", video: "video" };
-  const rendered = renderArtworkCaption(cap, cap.status || {});
+  const rendered = renderArtworkCaption(cap, cap.status || {}, { showNotes: captionNotesEnabled(env, message) });
   const firstCaption = rendered.text.slice(0, 1024);
   if (albumable.length) {
     // 相册带不了按钮、caption 不放 entity；来源由上层 sendSourceLine 补发文本承载。
@@ -1115,7 +1127,7 @@ async function sendAlbumByFileIds(files, caption, message, env, cap = null) {
 async function sendFileById(kind, fileId, caption, message, env, cap = null) {
   const fields = MEDIA_FIELDS[kind];
   if (!fields) throw new Error("不支持的媒体类型");
-  const rendered = renderArtworkCaption(cap, cap.status || {});
+  const rendered = renderArtworkCaption(cap, cap.status || {}, { showNotes: captionNotesEnabled(env, message) });
   const text = rendered.text.slice(0, 1024);
   const markup = buildOpenMarkup(cap?.sourceUrl);
   await telegram(env, fields[0], {
@@ -1219,7 +1231,7 @@ async function uploadMedia(env, kind, mediaUrl, caption, message, onStatus = nul
     else capStatus.previewOnly = true;
   }
   cap.status = capStatus;
-  captionText = renderArtworkCaption(cap, capStatus).text;
+  captionText = renderArtworkCaption(cap, capStatus, { showNotes: captionNotesEnabled(env, message) }).text;
   // 单文件上传：来源用 inline 按钮（multipart 可靠）；caption 不放 entity（offset bug）。
   const openMarkup = buildOpenMarkup(cap?.sourceUrl);
   const makeForm = (field) => {

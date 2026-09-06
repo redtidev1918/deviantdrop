@@ -10,6 +10,18 @@
 
 ---
 
+## [1.6.1] - 2026-09-06
+
+### 变更
+- 技术性状态提示（`⚠️ 已压缩 / 原图暂不可用 / 已作为文件发送` 等）默认**只在私聊显示**，
+  群聊/频道自动隐藏——对看图的人是噪音，想看原图点「在 DeviantArt 打开」即可。
+  新增环境变量 `CAPTION_NOTES`：`auto`（默认，私聊显示/群聊隐藏）、`always`（总显示）、
+  `never`（总隐藏）。file_id 重放同样按聊天类型决定是否显示。
+
+### 清理
+- 删除 caption 渲染中已无人引用的死代码（`renderCap` / `normalizeEntitiesForMultipart` /
+  `toMultipartEntities`；来源已改由按钮与补发文本承载，multipart 实体 offset 兼容层不再需要）。
+
 ## [1.6.0] - 2026-09-06
 
 ### 新增
