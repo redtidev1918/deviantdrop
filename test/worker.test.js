@@ -130,7 +130,13 @@ test("resolves two links with one DeviantArt session and serves the signed proxy
   assert.equal(initCalls, 2);
   assert.equal(mediaCalls.length, 2);
   assert.match(mediaCalls[0].url, /sendVideo$/);
-  assert.match(mediaCalls[0].body.caption, /作品 — artist/);
+  // caption 不再拼裸 URL：新排版含标题/作者，来源链接走 caption_entities 的 text_link。
+  assert.match(mediaCalls[0].body.caption, /🎨 作品/);
+  assert.match(mediaCalls[0].body.caption, /👤 artist/);
+  const entity = (mediaCalls[0].body.caption_entities || [])
+    .find((e) => e.type === "text_link" && /deviantart\.com\/artist\/art\/work-123456/.test(e.url));
+  assert.ok(entity, "caption_entities 应包含指向作品页的 text_link");
+  assert.equal(mediaCalls[0].body.caption.slice(entity.offset, entity.offset + entity.length), "DeviantArt");
   const proxied = await worker.fetch(new Request(mediaCalls[0].body.video, {
     headers: { Range: "bytes=0-4" },
   }), env);
@@ -272,7 +278,10 @@ test("answers /about, parses media captions, and ignores link-less or own-forwar
   assert.equal(caption.downloads, 1);
   assert.equal(captionMedia.length, 1);
   assert.match(captionMedia[0].url, /sendPhoto$/);
-  assert.match(captionMedia[0].body.caption, /deviantart\.com\/artist\/art\/work-123/);
+  // 来源链接走 caption_entities 的 text_link，不与文案粘连。
+  const cEntity = (captionMedia[0].body.caption_entities || [])
+    .find((e) => e.type === "text_link" && /deviantart\.com\/artist\/art\/work-123/.test(e.url));
+  assert.ok(cEntity, "caption_entities 应包含指向作品页的 text_link");
 
   // 无 caption 的图片：静默忽略。
   const plain = await send({
@@ -480,7 +489,11 @@ test("resolves artwork via official API and archive.org UUID mapping", async (t)
   const mediaCalls = calls.telegram.filter((c) => /send(Photo|Video|Animation)$/.test(c.url));
   assert.equal(mediaCalls.length, 2);
   assert.match(mediaCalls[0].url, /sendPhoto$/);
-  assert.match(mediaCalls[0].body.caption, /deviantart\.com\/loish\/art\/underwater-913624585/);
+  // 官方 API fallback 也用统一渲染：来源走 text_link entity，不与文案粘连。
+  const oEntity = (mediaCalls[0].body.caption_entities || [])
+    .find((e) => e.type === "text_link" && /deviantart\.com\/loish\/art\/underwater-913624585/.test(e.url));
+  assert.ok(oEntity, "官方 API fallback 应有指向作品页的 text_link");
+  assert.doesNotMatch(mediaCalls[0].body.caption, /https?:\/\//, "caption 不应包含裸 URL");
 });
 
 test("explains that fav.me short links need a canonical page URL", async (t) => {
@@ -660,6 +673,9 @@ test("poll uploads a photo/video album, preserves group topic, and replays all f
         const media = typeof body.media === 'string' ? JSON.parse(body.media) : body.media;
         assert.deepEqual(media.map(x => x.type), ['photo', 'video']);
         assert.equal(String(body.message_thread_id), '77');
+        // 相册（sendMediaGroup）不支持内联按钮：不得带 reply_markup；来源走 caption_entities。
+        assert.equal(body.reply_markup, undefined, "相册不应带 reply_markup");
+        assert.ok(media[0].caption_entities?.some((e) => e.type === "text_link"), "相册首图 caption 应有 text_link entity");
         if (init.body instanceof FormData) {
           assert.equal(media[0].media, 'attach://file0');
           assert.equal(await body.file0.text(), 'file-bytes');
