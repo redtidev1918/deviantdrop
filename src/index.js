@@ -356,8 +356,11 @@ async function sendDeviantArt(url, message, env, origin, sessionMemo = {}, onSta
   try {
     const media = await resolveWebMedia(url, env, origin, sessionMemo);
     dlog("send", `web ok id=${target.id} kind=${media.kind} url=${shortUrl(media.url)} display=${shortUrl(media.display)} displayBlur=${/blur_/.test(media.display || "")} matureBlurred=${!!media.matureBlurred}`);
-    // 成熟作品 OAuth 取原图失败（登录过期/无 uuid）时，在标题后明确提示，而不是静默发打码图。
-    const title = media.matureBlurred ? `${media.title}（登录已过期，成熟作品仅能发打码预览，请重新授权）` : media.title;
+    // 成熟作品 OAuth 取主图失败（登录过期/无 uuid）时提示重新授权；附加页匿名仅打码、
+    // OAuth 取不到时跳过（见 resolveWebMedia），这里提示点「打开」去作品页看其余画面。
+    let title = media.title;
+    if (media.matureBlurred) title = `${title}（登录已过期，成熟作品仅能发打码预览，请重新授权）`;
+    if (media.skippedExtras > 0) title = `${title}（另有 ${media.skippedExtras} 张成熟内容附加图无法匿名取原图，点下方「在 DeviantArt 打开」查看）`;
     const items = [{ kind: media.kind, url: media.url, display: media.display }, ...(media.extras || [])];
     // 多文件作品：主图 + 附加图合并成一条 Telegram 相册（≤10、仅 photo/video 时）；
     // 否则退回单图发送（此时记得 file_id 供后续去重）
@@ -372,7 +375,7 @@ async function sendDeviantArt(url, message, env, origin, sessionMemo = {}, onSta
       }
     } else {
       const sent = await sendOne(media.kind, media.url, `${title}\n${url.href}`, message, env, !origin, onStatus, media.display);
-      if (items.length === 1) await rememberFileId(target.id, media.kind, media.title, sent, env);
+      if (items.length === 1) await rememberFileId(target.id, media.kind, title, sent, env);
       for (const extra of media.extras || []) {
         await sendOne(extra.kind, extra.url, `（${media.title} 的更多画面）`, message, env, !origin, onStatus, extra.display);
       }
@@ -478,26 +481,37 @@ async function resolveWebMedia(url, env, origin, sessionMemo) {
         dlog("media", `photo → 最高清展示图 dev=${target.id} url=${shortUrl(display)}`);
       }
       const extras = [];
+      // 成熟作品的附加页：匿名 init 下发的 token 带 blur>=10 声明、原始文件 403，
+      // 官方 OAuth API 又只返回主图 content（不含 additionalMedia）——附加页无论如何
+      // 都拿不到未打码版。与其发用户明确不要的打码图，不如跳过并计数，让上层提示
+      // 点「打开」去作品页看其余画面。
+      const isMature = deviation?.isMature === true;
+      let skippedExtras = 0;
       // 多文件作品：其余画面在 init 响应的 deviation.extended.additionalMedia 里
       // （daviewer/dakit 同源结论），每项嵌套 Wix 媒体描述符；解析失败仅发主图。
       if (deviation?.isMultiMedia === true) {
-        try {
-          const raw = deviation?.extended?.additionalMedia;
-          if (Array.isArray(raw)) {
-            for (const entry of raw) {
-              const media = (entry && typeof entry === "object") ? entry.media : null;
-              const extraUrl = pickMultimediaUrl(media);
-              if (extraUrl) {
-                extras.push({
-                  kind: extensionKind(extraUrl) || "photo",
-                  url: await createProxyUrl(origin, extraUrl, env.WEBHOOK_SECRET),
-                  display: displayMediaUrl(media) || null,
-                });
+        const raw = deviation?.extended?.additionalMedia;
+        if (isMature && Array.isArray(raw)) {
+          skippedExtras = raw.length;
+          dlog("media", `mature 附加页跳过 dev=${target.id} count=${skippedExtras}（附加页匿名仅打码、OAuth 无此字段）`);
+        } else {
+          try {
+            if (Array.isArray(raw)) {
+              for (const entry of raw) {
+                const media = (entry && typeof entry === "object") ? entry.media : null;
+                const extraUrl = pickMultimediaUrl(media);
+                if (extraUrl) {
+                  extras.push({
+                    kind: extensionKind(extraUrl) || "photo",
+                    url: await createProxyUrl(origin, extraUrl, env.WEBHOOK_SECRET),
+                    display: displayMediaUrl(media) || null,
+                  });
+                }
               }
             }
+          } catch (error) {
+            console.error("多图解析失败，仅发主图:", error instanceof Error ? error.message : String(error));
           }
-        } catch (error) {
-          console.error("多图解析失败，仅发主图:", error instanceof Error ? error.message : String(error));
         }
       }
       return {
@@ -506,6 +520,7 @@ async function resolveWebMedia(url, env, origin, sessionMemo) {
         display,
         title: item.title,
         extras,
+        skippedExtras,
         // 成熟作品未能用 OAuth 取到未打码原图时置真，供上层在 caption 里提示“登录已过期”。
         matureBlurred,
       };
