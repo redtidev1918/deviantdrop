@@ -73,7 +73,8 @@ export class NotFoundError extends DeviantDropError {
   }
 }
 
-// 把任意错误归一成用户可见的简洁文案（绝不泄漏内部细节/secret）。
+// 把任意错误归一成用户可见的文案：分类错误用中文提示；其余剥离疑似 secret 后
+// 保留可读原文（便于用户反馈定位），绝不泄漏 token / cookie / bot token。
 export function publicError(error) {
   if (error instanceof DeviantDropError) return error.publicMessage || error.message;
   const message = error instanceof Error ? error.message : String(error);
@@ -82,8 +83,12 @@ export function publicError(error) {
     return "Telegram 无法读取该媒体，作品可能受限或媒体格式不受支持";
   }
   if (/timeout|timed out|abort/i.test(message)) return "请求超时，请稍后重试";
-  if (/[\u3400-\u9fff]/.test(message) && !/(?:token|cookie|secret)=|bot\d+:/i.test(message)) return message.slice(0, 300);
-  return "服务暂时无法完成该请求，请稍后重试。";
+  const cleaned = message
+    .replace(/(token|cookie|secret|pass|key)\s*[=:]\s*[^\s"'`]+/gi, "$1=<redacted>")
+    .replace(/\b\d+:[A-Za-z0-9_-]{20,}\b/g, "bot_token=<redacted>")
+    .trim()
+    .slice(0, 300);
+  return cleaned || "服务暂时无法完成该请求，请稍后重试。";
 }
 
 export function failureText(error) {

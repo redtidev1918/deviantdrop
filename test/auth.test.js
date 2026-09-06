@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { CredentialStore } from "../src/auth/credential-store.js";
 import { CookieStore } from "../src/auth/cookie-store.js";
 import { AuthNotifier } from "../src/auth/auth-notifier.js";
+import { publicError } from "../src/auth/errors.js";
 
 function tmpFile(name) {
   const dir = mkdtempSync(join(tmpdir(), "dd-auth-"));
@@ -99,4 +100,11 @@ test("AuthNotifier：未处于失效态时恢复不打扰", async () => {
   const notifier = new AuthNotifier({ cacheGet, cacheSet, sendTelegram: async (m, b) => { sent.push(b); }, adminIds: ["42"] });
   await notifier.notifyRecovered(); // 之前没报过失效
   assert.equal(sent.length, 0);
+});
+
+test("publicError：剥离 secret 后保留可读原文，不再笼统隐藏英文错误", () => {
+  assert.match(publicError(new Error("Bad Request: entity begins in a middle of a UTF-16 symbol")), /Bad Request/);
+  assert.match(publicError(new Error("fetch failed: token=abc123xxx")), /token=<redacted>/);
+  assert.doesNotMatch(publicError(new Error("refresh_token=deadbeef invalid")), /deadbeef/);
+  assert.equal(publicError(new Error("")), "服务暂时无法完成该请求，请稍后重试。");
 });

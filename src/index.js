@@ -1,6 +1,6 @@
 const TELEGRAM_API = "https://api.telegram.org";
 const DEVIANTART = "https://www.deviantart.com/";
-import { renderArtworkCaption, sourceLinkEntity, openButtonMarkup as buildOpenMarkup, buildCapFromMedia } from "./rendering/caption.js";
+import { renderArtworkCaption, sourceLinkEntity, openButtonMarkup as buildOpenMarkup, buildCapFromMedia, toMultipartEntities } from "./rendering/caption.js";
 import { publishArtwork } from "./publishing/gallery.js";
 import { fetchPublicMedia } from "./preview/server.js";
 import { getOfficialToken, clearOAuthAccessToken } from "./auth/token.js";
@@ -974,7 +974,8 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null, 
         media: `attach://file${i}`,
         ...(i === 0 ? {
           caption: fullCaption,
-          ...(fullEntities.length ? { caption_entities: fullEntities } : {}),
+          // multipart 端点按 code point 校验实体偏移（见 caption.js toMultipartEntities）
+          ...(fullEntities.length ? { caption_entities: toMultipartEntities(fullCaption, fullEntities) } : {}),
         } : {}),
       }))));
       entries.forEach(({ bytes, extension }, i) => {
@@ -990,7 +991,7 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null, 
     results.push(await telegramForm(env, method, () => {
       const f = mediaForm();
       f.set("caption", fullCaption);
-      if (fullEntities.length) f.set("caption_entities", JSON.stringify(fullEntities));
+      if (fullEntities.length) f.set("caption_entities", JSON.stringify(toMultipartEntities(fullCaption, fullEntities)));
       // 单张（entries 只剩 1，其余降级文档）支持 inline 按钮：补上来源按钮。
       const markup = buildOpenMarkup(cap.sourceUrl);
       if (markup) f.set("reply_markup", JSON.stringify(markup));
@@ -1003,7 +1004,7 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null, 
     results.push(await telegramForm(env, "sendDocument", () => {
       const f = mediaForm();
       f.set("caption", fullCaption);
-      if (fullEntities.length) f.set("caption_entities", JSON.stringify(fullEntities));
+      if (fullEntities.length) f.set("caption_entities", JSON.stringify(toMultipartEntities(fullCaption, fullEntities)));
       const markup = buildOpenMarkup(cap.sourceUrl);
       if (markup) f.set("reply_markup", JSON.stringify(markup));
       f.set("document", new Blob([doc.bytes], { type: "application/octet-stream" }), `original.${doc.extension}`);
@@ -1166,7 +1167,7 @@ async function uploadMedia(env, kind, mediaUrl, caption, message, onStatus = nul
     const form = new FormData();
     form.set("chat_id", String(message.chat.id));
     form.set("caption", captionText);
-    if (captionEntities.length) form.set("caption_entities", JSON.stringify(captionEntities));
+    if (captionEntities.length) form.set("caption_entities", JSON.stringify(toMultipartEntities(captionText, captionEntities)));
     form.set("reply_parameters", JSON.stringify({ message_id: message.message_id, allow_sending_without_reply: true }));
     if (openMarkup) form.set("reply_markup", JSON.stringify(openMarkup));
     if (message.message_thread_id) form.set("message_thread_id", String(message.message_thread_id));
