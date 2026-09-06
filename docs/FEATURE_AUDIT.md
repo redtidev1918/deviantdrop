@@ -24,4 +24,4 @@ OAuth 授权无法读取用户浏览器的 DeviantArt Cookie。主方案采用�
 
 ## 完成结果
 
-本轮补齐真实预览/TelePress 接线，修复上述认证、HTTP、caption 与权限问题；69 项测试及 Workers dry-run 通过。TelePress 现有上游鉴权实现经独立 venv 的 33 项测试验证，无需重复修改其业务。生产 OAuth 授权与公网 OG 抓取仍需运营方提供 HTTPS 域名、设置 redirect whitelist 并亲自完成授权。操作与模块/数据路径见 [指南](AUTH_AND_PREVIEW.md)。
+本轮补齐真实预览/TelePress 接线，修复上述认证、HTTP、caption 与权限问题；69 项测试及 Workers dry-run 通过。TelePress 现有上游鉴权实现经独立 venv 的 33 项测试验证，无需重复修改其业务。发布后补充无公网域名场景：`scripts/vps-login.sh` + ssh 隧道完成 OAuth 登录并直接写入服务器凭据（见 [VPS 手册 4.6](VPS.md)），运营方无需域名即可完成授权；公网 OG 抓取 / Telegram 内 `/login` 按钮仍属可选功能，配置 HTTPS `PUBLIC_BASE_URL` 后启用。操作与模块/数据路径见 [指南](AUTH_AND_PREVIEW.md)。

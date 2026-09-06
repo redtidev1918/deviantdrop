@@ -107,26 +107,51 @@ DeviantArt 登录 Cookie 交给 Bot。
 > 注意：Cookie 等同账号登录态，别提交到 git（`.env` 已被 .gitignore 排除）。
 > 好友限定/仅订阅可见的作品仍可能拿不到；公开但标了 Mature 的作品，登录后即可下原图。
 
-## 4.6 登录 DeviantArt（持久化，推荐替代 Cookie）
+## 4.6 登录 DeviantArt（OAuth，推荐替代 Cookie）
 
-Cookie 会过期且无法自动续期；用 OAuth 登录一次，Bot 之后自动续期、长期有效（成熟/NSFW 原图也走此登录态）：
+Cookie 会过期且无法自动续期；用 OAuth 登录一次，Bot 之后自动续期、长期有效（成熟/NSFW 原图也走此登录态）。
+登录凭据保存在 `/data/auth/deviantart.json`（容器卷内，0600），与 `.env` 里的旧 `DA_REFRESH_TOKEN` 相互独立：
+`.env` 只在首次启动时作为迁移 seed，之后轮换/失效都以该文件为准。
 
-1. 在 deviantart.com/developers 你的 App 的 **OAuth2 Redirect URI Whitelist** 里加一行：`http://127.0.0.1:8787/callback`
-2. 本机运行（会提示打开浏览器授权，并把 refresh_token 打印出来）：
+### 方式 A：没有公网域名 → ssh 隧道登录（推荐）
 
-   ```bash
-   node scripts/da-login.mjs 76744
-   ```
+不需要开放任何公网端口、不需要域名。DeviantArt 应用白名单已含 `http://127.0.0.1:8787/callback`（OAuth 允许 localhost 用 http）。
 
-3. 把打印出的 refresh_token 写进服务器 `.env`：
+打开**两个本地终端**：
 
-   ```dotenv
-   DA_REFRESH_TOKEN=你得到的refresh_token
-   ```
+```bash
+# 终端 1：建立隧道（保持这个终端开着，不要关）
+ssh -L 8787:127.0.0.1:8787 root@your-server.example
+```
 
-4. `docker compose up -d` 重启；删除/清空 `DA_COOKIES` 即可（OAuth 优先）。
+```bash
+# 终端 2：在服务器上启动登录服务（10 分钟内有效）
+ssh root@your-server.example 'cd /opt/deviantdrop && ./scripts/vps-login.sh'
+```
 
-> 原图下载仍受 DeviantArt 免费账号每日额度限制；OAuth 解决的是“登录态/打码”，不是额度。
+然后在本机浏览器打开 **http://127.0.0.1:8787**：
+
+1. 浏览器自动跳到 DeviantArt 官方授权页 → 登录并同意（**浏览器需能访问 deviantart.com**，本地被墙就给浏览器挂代理）。
+2. 页面显示"DeviantArt 登录成功"即可。
+3. 回到终端 2：脚本检测到凭据后自动 `chown` 并重启容器（约 30 秒），打印完成信息。
+4. 在 Telegram 对 Bot 私聊发送 `/status`，看到 `OAuth: valid` 即成功。
+
+> 原理：浏览器访问 `127.0.0.1:8787` 实际经 ssh 隧道到达服务器上的登录服务；DeviantArt 授权后把
+> 浏览器重定向回同一个 `127.0.0.1:8787/callback`（仍在隧道内），refresh token 直接写入服务器卷，
+> 不经手 `.env`、不打印、不上传。
+
+### 方式 B：有公网 HTTPS 域名 → Telegram 内一键 `/login`
+
+配置 `PUBLIC_BASE_URL`（HTTPS 域名反代到 `127.0.0.1:8080`），把 `<域名>/auth/deviantart/callback`
+加进 DA 应用白名单，然后在 Bot 私聊发 `/login` 点按钮授权，秒级生效、无需重启。
+细节见 [docs/AUTH_AND_PREVIEW.md](AUTH_AND_PREVIEW.md)。
+
+### 方式 C：首次部署用 `.env` seed（一次性）
+
+没有执行上面任一流程前，可把已有 refresh token 写进 `.env` 的 `DA_REFRESH_TOKEN` 作为首次迁移来源；
+容器首次启动会把它落盘到 `/data/auth/deviantart.json`，之后不再读回 `.env`。
+
+> 原图下载仍受 DeviantArt 免费账号每日额度限制；OAuth 解决的是"登录态/打码"，不是额度。
 
 ## 4.7 推送即部署（可选）
 

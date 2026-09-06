@@ -10,6 +10,13 @@
 
 ---
 
+## [Unreleased]
+
+### 新增
+- 没有公网域名也能完成 DeviantArt 登录：`scripts/vps-login.sh` + 一条 ssh 隧道即可，
+  浏览器授权后凭据自动写入服务器并生效，无需开放端口、无需域名、无需改 `.env`。
+  操作步骤见 docs/VPS.md「4.6 登录 DeviantArt」。
+
 ## [1.5.0] - 2026-09-06
 
 ### 新增
