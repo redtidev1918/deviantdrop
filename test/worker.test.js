@@ -483,7 +483,7 @@ test("resolves artwork via official API and archive.org UUID mapping", async (t)
   assert.match(mediaCalls[0].body.caption, /deviantart\.com\/loish\/art\/underwater-913624585/);
 });
 
-test("explains that fav.me short links need a canonical page URL on the official path", async (t) => {
+test("explains that fav.me short links need a canonical page URL", async (t) => {
   const originalFetch = globalThis.fetch;
   let notice;
   globalThis.fetch = async (input, init = {}) => {
@@ -509,7 +509,7 @@ test("explains that fav.me short links need a canonical page URL on the official
     from: { id: 42 }, chat: { id: 701, type: "private" }, message_id: 40,
     text: "https://fav.me/dabc123",
   });
-  assert.match(notice, /旧式\/短链/);
+  assert.match(notice, /无法自动解析作者信息/);
 });
 
 test("reuses the Telegram file_id for repeated links", async (t) => {

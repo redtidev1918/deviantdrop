@@ -390,16 +390,41 @@ async function sendDeviantArt(url, message, env, origin, sessionMemo = {}, onSta
   await rememberFileId(target.id, official.kind, official.title, sent, env);
 }
 
+// fav.me / view / view.php 等短链不带作者名，而 _puppy/init 自 2026 年起把 username 也列为必填
+// （缺失 400「username is required」）。跟随 fav.me 重定向拿规范链接里的作者名；出口无法连 fav.me 时给明确提示。
+async function resolveTargetUsername(url, env) {
+  try {
+    const response = await fetch(url, {
+      headers: { ...DA_HEADERS, Accept: "text/html" },
+      redirect: "follow",
+      signal: AbortSignal.timeout(8_000),
+    });
+    const finalUrl = response.url || url.href;
+    response.body?.cancel();
+    const parts = new URL(finalUrl).pathname.split("/").filter(Boolean);
+    // 规范链接：/<username>/art/<slug>-<id>
+    return parts.length >= 3 && parts[1] === "art" ? parts[0] : parts[0] || null;
+  } catch (error) {
+    dlog("media", `fav.me 重定向解析作者失败: ${error instanceof Error ? error.cause?.code || error.name : String(error)}`);
+    return null;
+  }
+}
+
 async function resolveWebMedia(url, env, origin, sessionMemo) {
+  // username 必填：短链先解析作者名，失败则明确提示（而不是落进 init 的谜之 400）。
+  let target = parseDeviantArtTarget(url);
+  if (!target.username) target.username = await resolveTargetUsername(url, env);
+  if (!target.username) {
+    throw new Error("这个短链（fav.me/view）无法自动解析作者信息：请打开链接后，把完整的作品页网址（deviantart.com/作者/art/…）发给我。");
+  }
   // CSRF 会话有效期较短，缓存的 csrf 可能已过期导致 init 400：过期时清缓存换新会话重试一次。
   for (let attempt = 0; ; attempt += 1) {
     if (!sessionMemo.session) sessionMemo.session = await getDeviantArtSession(env);
     const session = sessionMemo.session;
     try {
-      const target = parseDeviantArtTarget(url);
       const endpoint = new URL("/_puppy/dadeviation/init", DEVIANTART);
       endpoint.searchParams.set("deviationid", target.id);
-      if (target.username) endpoint.searchParams.set("username", target.username);
+      endpoint.searchParams.set("username", target.username);
       // 该接口自 2026 年起把 type 列为必填（art/journal 等枚举值），缺失会返回 400。
       endpoint.searchParams.set("type", "art");
       endpoint.searchParams.set("include_session", "false");
