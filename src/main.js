@@ -23,6 +23,7 @@ import { CookieStore } from "./auth/cookie-store.js";
 import { AuthNotifier, resolveAdminIds } from "./auth/auth-notifier.js";
 import { OAuthLoginFlow } from "./auth/oauth-login.js";
 import { createAuthRequestHandler } from "./auth/http-auth.js";
+import { TelePress } from "./publishing/telepress.js";
 
 // —— 代理：国内服务器经 clash 等出口访问被墙的 Telegram/DeviantArt ——
 const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || "";
@@ -96,21 +97,7 @@ function migrationSeedToken() {
     return v || null;
   } catch { return null; }
 }
-const credentialStore = new CredentialStore({
-  path: join(AUTH_DIR, "deviantart.json"),
-  seedEnvToken: migrationSeedToken(),
-});
-const cookieStore = new CookieStore({
-  path: join(AUTH_DIR, "deviantart-cookies.json"),
-  seedEnvCookie: process.env.DA_COOKIES || null,
-});
-
-// —— Web OAuth 登录流程 + 认证通知 ——
-const publicBaseUrl = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
-const redirectUri = publicBaseUrl ? `${publicBaseUrl}/auth/deviantart/callback` : "";
-const adminIds = resolveAdminIds({ ADMIN_IDS: process.env.ADMIN_IDS, ALLOWED_USER_IDS: process.env.ALLOWED_USER_IDS });
-
-// cacheGet/cacheSet 供 AuthNotifier 复用 index.js 的缓存语义。
+// cacheGet/cacheSet 复用 index.js 的缓存语义（AuthNotifier 冷却、TelePress URL 缓存共用）。
 const cacheGet = async (ns, k) => {
   const store = globalThis.caches?.default;
   if (!store) return null;
@@ -125,6 +112,28 @@ const cacheSet = async (ns, k, value, ttl) => {
     new Response(JSON.stringify(value), { headers: { "Cache-Control": `public, max-age=${ttl}` } }),
   );
 };
+
+const credentialStore = new CredentialStore({
+  path: join(AUTH_DIR, "deviantart.json"),
+  seedEnvToken: migrationSeedToken(),
+});
+const cookieStore = new CookieStore({
+  path: join(AUTH_DIR, "deviantart-cookies.json"),
+  seedEnvCookie: process.env.DA_COOKIES || null,
+});
+
+// —— TelePress（可选）：仅 large-gallery/fallback，默认 off；失败不影响 Telegram 主链路 ——
+const telepress = new TelePress({
+  url: process.env.TELEPRESS_URL || "",
+  apiKey: process.env.TELEPRESS_API_KEY || "",
+  mode: process.env.TELEPRESS_MODE || "off",
+  cacheGet, cacheSet,
+});
+
+// —— Web OAuth 登录流程 + 认证通知 ——
+const publicBaseUrl = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
+const redirectUri = publicBaseUrl ? `${publicBaseUrl}/auth/deviantart/callback` : "";
+const adminIds = resolveAdminIds({ ADMIN_IDS: process.env.ADMIN_IDS, ALLOWED_USER_IDS: process.env.ALLOWED_USER_IDS });
 
 const loginStartBase = publicBaseUrl ? `${publicBaseUrl}/auth/deviantart/start` : null;
 let authNotifier; // 先声明：flow 回调在运行时才用到，此时已完成赋值
@@ -166,7 +175,7 @@ const env = {
   cookieStore,
   authFlow,
   authNotifier,
-  telepress: null, // 由 publishing/telepress.js 装配（可选）
+  telepress,
   handleAuthRequest: createAuthRequestHandler(authFlow),
 };
 for (const key of ["BOT_TOKEN", "WEBHOOK_SECRET"]) {
