@@ -23,6 +23,12 @@ docker compose up -d --build
 - 图片 / 多图相册（sendMediaGroup，超过 10 张自动分批）/ GIF / 视频 / 超大图压缩与 document 兜底；Telegram 拉不动 CDN 时自动下载后 multipart 上传。
 - `/start` `/help` `/about` 命令；每聊天限流、去重、429/500/503 退避重试。
 
+### 群聊与频道
+
+- Bot 默认开启「群组隐私模式」，此时在群里看不到普通消息（只有命令）。要让它响应群里的作品链接：在 **BotFather** 里 `/mybots` → 选 Bot → **Bot Settings → Group Privacy → Turn off**，然后把 Bot 移出群再拉回（或设为管理员）使设置生效。
+- 频道里把 Bot 设为管理员、以「发到频道」的方式发链接即可（`channel_post` 同样处理）。
+- 群聊/频道默认**不显示**技术性状态提示（见「回复排版」），caption 更干净。
+
 ### 登录与所有者命令
 
 管理命令（`/login`、`/status`）只允许 **Bot 所有者**使用：在 `.env` 设置 `ADMIN_IDS=<你的 Telegram 用户 ID>`。未配置时管理命令一律拒绝；普通使用者白名单（`ALLOWED_USER_IDS`）不是管理员。

@@ -157,6 +157,8 @@ docker compose logs -f deviantdrop     # 轮询模式会持续 getUpdates
 - Node 原生 `fetch` 与原生 `FormData` 必须配套使用；代理通过 `dispatcher` 指定。混用独立版本的 `undici.fetch` 可能发送纯文本 `[object FormData]`，导致 Telegram 报缺少 photo/media。
 - 相册必须使用 `sendMediaGroup`；给多条 `sendPhoto` 添加 `media_group_id` 不会合并成相册。
 - 群话题回复保留 `message_thread_id`，频道的 `channel_post` 同样处理。设置了 `ALLOWED_USER_IDS` 时仍按发送者用户 ID 授权，匿名管理员/频道身份不能冒充获准用户。
+- **群里收不到普通链接**：先确认 Bot 的「群组隐私模式」已在 BotFather 关闭（`/mybots` → Bot Settings → Group Privacy → Turn off），再把 Bot 移出群重新拉回或设为管理员。隐私模式开着时 Telegram 不向 Bot 投递群里的非命令消息，`getMe` 的 `can_read_all_group_messages` 会是 `false`。
+- 群聊/频道默认隐藏技术性 ⚠️ 状态提示（`CAPTION_NOTES=auto`）；要在所有聊天都显示设 `CAPTION_NOTES=always`，全关设 `never`。
 - 日志没有对应 `[upd]` 时检查 Telegram 投递及是否有其他轮询实例；有 `[upd]` 时检查发送权限与错误日志。不能仅凭 `/about` 到达就认定普通链接也已投递。
 - `npm test` 包含本地真实 HTTP multipart 序列化和轮询相册测试，不会向真实 Telegram 聊天发送消息。
 
