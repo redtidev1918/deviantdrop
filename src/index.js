@@ -1,6 +1,6 @@
 const TELEGRAM_API = "https://api.telegram.org";
 const DEVIANTART = "https://www.deviantart.com/";
-import { renderArtworkCaption, sourceLinkEntity, openButtonMarkup as buildOpenMarkup, buildCapFromMedia, normalizeEntitiesForMultipart } from "./rendering/caption.js";
+import { renderArtworkCaption, sourceLinkEntity, buildCapFromMedia, normalizeEntitiesForMultipart } from "./rendering/caption.js";
 import { publishArtwork } from "./publishing/gallery.js";
 import { fetchPublicMedia } from "./preview/server.js";
 import { getOfficialToken, clearOAuthAccessToken } from "./auth/token.js";
@@ -47,7 +47,6 @@ async function sendPublishedLink(message, env, id, sourceUrl, publishedUrl) {
     chat_id: message.chat.id,
     text: "在 Telegraph 查看全部",
     entities: [{ type: "text_link", offset: 0, length: "在 Telegraph 查看全部".length, url: publishedUrl }],
-    reply_markup: buildOpenMarkup(sourceUrl, [{ text: "在 Telegraph 查看全部", url: publishedUrl }]),
     reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
     ...(message.message_thread_id ? {message_thread_id:message.message_thread_id} : {}),
     ...(env.PUBLIC_BASE_URL ? {link_preview_options:{url:`${env.PUBLIC_BASE_URL}/d/${id}`,prefer_large_media:true,show_above_text:false}} : {}),
@@ -858,8 +857,6 @@ async function sendOne(kind, mediaUrl, caption, message, env, upload = false, on
   const rendered = renderArtworkCaption(cap, cap.status || {});
   const text = rendered.text.slice(0, 1024);
   const entities = cap ? [sourceLinkEntity(text, cap.sourceUrl)].filter(Boolean) : [];
-  const sourceUrl = cap.sourceUrl;
-  const markup = buildOpenMarkup(sourceUrl);
   if (upload) {
     // 轮询模式：Telegram 服务器拉不动 wixmp（需 Referer/UA），由 Bot 先下载再上传。
     return uploadMedia(env, kind, mediaUrl, text, message, onStatus, fallbackUrl, cap);
@@ -869,7 +866,6 @@ async function sendOne(kind, mediaUrl, caption, message, env, upload = false, on
     caption: text,
     ...(entities.length ? { caption_entities: entities } : {}),
     reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
-    ...(markup ? { reply_markup: markup } : {}),
     ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
   };
   try {
@@ -1030,9 +1026,6 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null, 
       const f = mediaForm();
       f.set("caption", fullCaption);
       if (fullEntities.length) f.set("caption_entities", JSON.stringify(normalizeEntitiesForMultipart(fullCaption, fullEntities)));
-      // 单张（entries 只剩 1，其余降级文档）支持 inline 按钮：补上来源按钮。
-      const markup = buildOpenMarkup(cap.sourceUrl);
-      if (markup) f.set("reply_markup", JSON.stringify(markup));
       f.set(field, new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `${field}.${extension}`);
       return f;
     }));
@@ -1043,8 +1036,6 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null, 
       const f = mediaForm();
       f.set("caption", fullCaption);
       if (fullEntities.length) f.set("caption_entities", JSON.stringify(normalizeEntitiesForMultipart(fullCaption, fullEntities)));
-      const markup = buildOpenMarkup(cap.sourceUrl);
-      if (markup) f.set("reply_markup", JSON.stringify(markup));
       f.set("document", new Blob([doc.bytes], { type: "application/octet-stream" }), `original.${doc.extension}`);
       return f;
     }));
@@ -1109,14 +1100,12 @@ async function sendFileById(kind, fileId, caption, message, env, cap = null) {
   const rendered = renderArtworkCaption(cap, cap.status || {});
   const text = rendered.text.slice(0, 1024);
   const entities = cap ? [sourceLinkEntity(text, cap.sourceUrl)].filter(Boolean) : [];
-  const markup = buildOpenMarkup(cap.sourceUrl);
   await telegram(env, fields[0], {
     chat_id: message.chat.id,
     [fields[1]]: fileId,
     caption: text,
     ...(entities.length ? { caption_entities: entities } : {}),
     reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
-    ...(markup ? { reply_markup: markup } : {}),
     ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
   });
 }
@@ -1215,14 +1204,12 @@ async function uploadMedia(env, kind, mediaUrl, caption, message, onStatus = nul
   cap.status = capStatus;
   captionText = renderArtworkCaption(cap, capStatus).text;
   captionEntities = [sourceLinkEntity(captionText, cap.sourceUrl)].filter(Boolean);
-  const openMarkup = buildOpenMarkup(cap.sourceUrl);
   const makeForm = (field) => {
     const form = new FormData();
     form.set("chat_id", String(message.chat.id));
     form.set("caption", captionText);
     if (captionEntities.length) form.set("caption_entities", JSON.stringify(normalizeEntitiesForMultipart(captionText, captionEntities)));
     form.set("reply_parameters", JSON.stringify({ message_id: message.message_id, allow_sending_without_reply: true }));
-    if (openMarkup) form.set("reply_markup", JSON.stringify(openMarkup));
     if (message.message_thread_id) form.set("message_thread_id", String(message.message_thread_id));
     form.set(field, new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `${field}.${extension}`);
     return form;

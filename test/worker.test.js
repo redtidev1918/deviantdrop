@@ -877,7 +877,9 @@ test('TelePress large-gallery hook publishes once, and failure leaves Telegram d
  const msg={from:{id:42},chat:{id:987,type:'private'},message_id:1,text:'https://www.deviantart.com/artist/art/gallery-7654321'};
  await handleUpdate({message:msg},env);await handleUpdate({message:msg},env);
  assert.equal(publications,1);assert.equal(albums,2);
- assert.ok(replies.some(r=>r.reply_markup?.inline_keyboard?.[0]?.some(b=>b.url==='https://telegra.ph/gallery')));
+ // TelePress 画廊入口作为可点击 text_link 文本消息发送（作品统一不再带冗余 inline 按钮）
+ assert.ok(replies.some(r=>r.text?.includes('在 Telegraph 查看全部') && r.entities?.[0]?.url==='https://telegra.ph/gallery'));
+ assert.ok(replies.every(r=>!r.reply_markup),'作品发送统一不带 inline 按钮');
  fail=true;mem.clear();await handleUpdate({message:{...msg,chat:{id:986,type:'private'}}},env);
  assert.equal(albums,3);assert.ok(!replies.some(r=>r.text?.includes('处理失败')));
 });

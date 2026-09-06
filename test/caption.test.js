@@ -4,7 +4,6 @@ import {
   renderArtworkCaption,
   sourceLinkEntity,
   openButtonMarkup,
-  sourceLineText,
   buildCapFromMedia,
   toMultipartEntities,
   normalizeEntitiesForMultipart,
@@ -16,7 +15,7 @@ test("caption 不含裸 URL，来源通过 text_link entity 承载", () => {
     {},
   );
   assert.doesNotMatch(text, /https?:\/\//, "caption 文本里不应出现裸 URL");
-  assert.match(text, /来源：DeviantArt/);
+  assert.match(text, /在 DeviantArt 打开/);
   const entity = sourceLinkEntity(text, "https://www.deviantart.com/mrjoel/art/x-1376900771");
   assert.ok(entity);
   assert.equal(entity.type, "text_link");
@@ -33,7 +32,7 @@ test("caption 排版：标题/作者/数量分行，warning 独立成行不粘�
   assert.match(text, /🖼 6 个媒体/);
   // warning 是单独一行（⚠️），不会贴在链接或标题后面
   assert.match(text, /⚠️ 部分图片超过 10MB，已压缩发送；原图暂不可用，已使用高清展示图/);
-  assert.match(text, /来源：DeviantArt/);
+  assert.match(text, /在 DeviantArt 打开/);
 });
 
 test("text_link entity 的 offset 按 UTF-16 code unit 计算（emoji 安全）", () => {
@@ -46,21 +45,13 @@ test("text_link entity 的 offset 按 UTF-16 code unit 计算（emoji 安全）"
   assert.equal(entity.url, sourceUrl);
 });
 
-test("openButtonMarkup：单媒体有来源按钮，无来源时为 undefined", () => {
+test("openButtonMarkup：有来源才生成按钮，无来源时为 undefined", () => {
   const markup = openButtonMarkup("https://www.deviantart.com/x");
   assert.ok(markup?.inline_keyboard?.[0]?.[0]);
   assert.equal(markup.inline_keyboard[0][0].text, "在 DeviantArt 打开");
   assert.equal(markup.inline_keyboard[0][0].url, "https://www.deviantart.com/x");
   assert.equal(openButtonMarkup(null), undefined);
   assert.equal(openButtonMarkup(""), undefined);
-});
-
-test("sourceLineText：文本消息里的可点击来源行带 text_link", () => {
-  const { text, entities } = sourceLineText("https://www.deviantart.com/x");
-  assert.match(text, /DeviantArt/);
-  assert.equal(entities.length, 1);
-  assert.equal(entities[0].type, "text_link");
-  assert.equal(text.slice(entities[0].offset, entities[0].offset + entities[0].length), "DeviantArt");
 });
 
 test("buildCapFromMedia：拆分 '标题 — 作者'，计算 mediaCount", () => {
@@ -82,24 +73,25 @@ test("buildCapFromMedia：拆分 '标题 — 作者'，计算 mediaCount", () =>
  });
 
 test("toMultipartEntities：UTF-16 offset 换算为 code point offset（multipart 端点语义）", () => {
+  // 含多个 emoji（代理对）+ 中文状态行，验证换算后按 code point 仍精确切中标签。
   const { text } = renderArtworkCaption(
-    { title: "Heavy Mama Hunt (2,3/19)", author: "MrjoelPreggoArt", mediaCount: 2 },
+    { title: "画 Heavy Mama (2,3/19)", author: "作者", mediaCount: 2 },
     { compressed: true, blurredPreview: true },
   );
   const sourceUrl = "https://www.deviantart.com/x";
   const utf16 = sourceLinkEntity(text, sourceUrl);
-  assert.equal(utf16.offset, 107, "UTF-16 端 offset");
+  assert.equal(text.slice(utf16.offset, utf16.offset + utf16.length), "DeviantArt", "UTF-16 端切中标签");
   const mp = toMultipartEntities(text, [utf16]);
-  assert.equal(mp[0].offset, 103, "multipart 端应换算成 code point offset");
-  // 换算后的 offset 用 code point 语义仍切中 "DeviantArt"
+  // 标签前的 emoji/高位字符使 code point 偏移小于 UTF-16 偏移
+  assert.ok(mp[0].offset < utf16.offset, "code point 偏移应小于 UTF-16 偏移");
   const cpText = [...text];
-  assert.equal(cpText.slice(mp[0].offset, mp[0].offset + mp[0].length).join(""), "DeviantArt");
-  // 行首 emoji(🎨👤🔗) 也是代理对：ASCII 标题下 32 → 29，换算后按 code point 仍切中
+  assert.equal(cpText.slice(mp[0].offset, mp[0].offset + mp[0].length).join(""), "DeviantArt", "multipart 端切中标签");
+
+  // ASCII 标题：可预期的具体偏移（行首 3 个 emoji → 差 3）。
   const ascii = renderArtworkCaption({ title: "Plain ASCII", author: "Author" }, {}).text;
   const asciiUtf16 = sourceLinkEntity(ascii, sourceUrl);
-  assert.equal(asciiUtf16.offset, 32);
   const asciiMp = toMultipartEntities(ascii, [asciiUtf16]);
-  assert.equal(asciiMp[0].offset, 29);
+  assert.equal(asciiUtf16.offset - asciiMp[0].offset, 3, "3 个代理对 emoji 使 UTF-16 偏移多 3");
   const asciiCp = [...ascii];
   assert.equal(asciiCp.slice(asciiMp[0].offset, asciiMp[0].offset + asciiMp[0].length).join(""), "DeviantArt");
 });
