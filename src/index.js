@@ -87,6 +87,15 @@ export default {
     if (request.method === "GET" && url.pathname === "/") {
       return Response.json({ ok: true, service: "deviantdrop" });
     }
+    if (request.method === "GET" && url.pathname === "/health") {
+      return Response.json({ ok: true, service: "deviantdrop" });
+    }
+    // Web OAuth 登录（/auth/deviantart/start|callback）：由 main.js 装配的 env.handleAuthRequest 处理。
+    // poll 与 webhook 模式都会启动 HTTP server，因此该路由两种模式都可用。
+    if (url.pathname.startsWith("/auth/")) {
+      if (typeof env.handleAuthRequest === "function") return env.handleAuthRequest(request);
+      return new Response("Not configured", { status: 404 });
+    }
     if (["GET", "HEAD"].includes(request.method) && url.pathname === "/media") {
       return proxyMedia(request, env);
     }
@@ -158,6 +167,13 @@ async function handleMessage(message, env, origin) {
       reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
       ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
     });
+    return;
+  }
+
+  // 管理员命令：/login（Web OAuth 重新授权）、/status（各组件状态）。
+  const adminCommand = (message.text ?? "").match(/^\/(login|status)(?:@\w+)?(?:\s|$)/i)?.[1]?.toLowerCase();
+  if (adminCommand) {
+    await handleAdminCommand(adminCommand, message, env);
     return;
   }
 
@@ -283,6 +299,58 @@ async function handleMessage(message, env, origin) {
     }
   } finally {
     await statusDelete(); // 全部完成：删除状态提示
+  }
+}
+
+// 管理员命令处理：/login（Web OAuth 重新授权）、/status（组件状态，不泄漏任何 secret）。
+async function handleAdminCommand(command, message, env) {
+  const replyOpts = {
+    reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+    ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
+  };
+  const send = (text, extra = {}) => telegram(env, "sendMessage", { chat_id: message.chat.id, text, ...replyOpts, ...extra });
+
+  // 门禁：管理员列表非空时，非管理员不可用。ADMIN_IDS 优先，否则回退 ALLOWED_USER_IDS。
+  const adminIds = String(env.ADMIN_IDS || env.ALLOWED_USER_IDS || "").split(",").map((s) => s.trim()).filter(Boolean);
+  if (adminIds.length && !adminIds.includes(String(message.from?.id ?? ""))) {
+    await send("这个命令仅管理员可用。");
+    return;
+  }
+
+  if (command === "login") {
+    const authFlow = env.authFlow;
+    if (!env.PUBLIC_BASE_URL || !authFlow?.configured?.()) {
+      await send("Web OAuth 登录未配置：需要设置 PUBLIC_BASE_URL 且提供 CLIENT_ID（见 README「Web 登录」）。\n当前仍可使用 scripts/da-login.mjs 命令行登录。");
+      return;
+    }
+    const token = authFlow.issueLoginToken();
+    const startUrl = `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/auth/deviantart/start?t=${encodeURIComponent(token)}`;
+    await send("DeviantArt 登录需要更新。点击下方按钮，在浏览器里授权即可（无需重启服务）：", {
+      reply_markup: { inline_keyboard: [[{ text: "重新登录 DeviantArt", url: startUrl }]] },
+    });
+    return;
+  }
+
+  if (command === "status") {
+    const store = env.credentialStore;
+    const authState = store ? store.getState() : null;
+    const authText = authState
+      ? (authState.state === "valid" && authState.hasToken ? "valid（已登录）" : authState.state === "invalid" ? "invalid（需 /login）" : "absent（未登录）")
+      : (env.DA_REFRESH_TOKEN ? "env 配置" : "未配置");
+    const cookieText = env.cookieStore ? (env.cookieStore.available() ? "available" : "none") : (env.DA_COOKIES ? "env 配置" : "none");
+    const teleText = env.telepress ? env.telepress.mode() : "disabled";
+    const lines = [
+      "DeviantDrop Status",
+      "",
+      `Telegram: OK`,
+      `DeviantArt Web: 运行中`,
+      `OAuth: ${authText}`,
+      `Cookie: ${cookieText}`,
+      `TelePress: ${teleText}`,
+      `Cache: OK`,
+    ];
+    await send(lines.join("\n"));
+    return;
   }
 }
 
@@ -742,17 +810,23 @@ async function getOfficialToken(env) {
   const cached = await cacheGet("api", "token");
   if (cached?.token) return cached.token;
   const endpoint = new URL(DA_TOKEN_URL);
-  // refresh token 来源：优先统一 CredentialStore（单一事实来源）；回退旧 env 回调（测试/兼容）。
   const store = env.credentialStore;
-  const storedRefresh = store ? store.getRefreshToken() : null;
-  const hasUserToken = !!(storedRefresh || env.DA_REFRESH_TOKEN);
-  const legacyRefresh = async () => {
+
+  // refresh token 来源：
+  //   - 装配了 CredentialStore（生产 main.js）：store 是单一事实来源。store invalid/absent
+  //     时返回 null，绝不回退 .env / 旧持久化文件里的 stale token（避免反复拿作废 token 刷）。
+  //   - 未装配 store（测试 / 旧 worker 环境）：沿用 env.DA_REFRESH_TOKEN 与旧回调。
+  let refreshToken = null;
+  if (store) {
+    refreshToken = store.getRefreshToken();
+  } else if (env.DA_REFRESH_TOKEN) {
     const rotated = await cacheGet("api", "refresh");
     const fromFile = typeof env.loadRefreshToken === "function" ? await env.loadRefreshToken() : null;
-    return rotated?.token || fromFile || env.DA_REFRESH_TOKEN || null;
-  };
-  const refreshToken = storedRefresh || await legacyRefresh();
-  if (hasUserToken && refreshToken) {
+    refreshToken = rotated?.token || fromFile || env.DA_REFRESH_TOKEN;
+  }
+  const hadUserToken = !!refreshToken;
+
+  if (refreshToken) {
     // 用户 OAuth：refresh token 每次刷新会轮换（旧值随即作废）。轮换后立即写回 store 持久化。
     endpoint.search = new URLSearchParams({
       grant_type: "refresh_token",
@@ -771,18 +845,19 @@ async function getOfficialToken(env) {
   const data = await response.json().catch(() => null);
   if (!response.ok || !data?.access_token) {
     const reason = data?.error_description || `HTTP ${response.status}`;
-    // 失效的 refresh token：标记 CredentialStore invalid、清缓存与旧持久化值，之后不再拿旧 token 重试。
-    if (hasUserToken && isInvalidRefreshToken(reason)) {
+    // 失效的 refresh token：标记 store invalid、清缓存与旧持久化值，之后不再拿旧 token 重试
+    // （store.getRefreshToken() 返回 null，后续请求自动退回 client_credentials 公开访问）。
+    if (hadUserToken && isInvalidRefreshToken(reason)) {
       await cacheSet("api", "token", null, 1);
       await cacheSet("api", "refresh", null, 1);
       if (store) store.invalidate(reason);
       if (typeof env.clearRefreshToken === "function") await env.clearRefreshToken();
-      dlog("oauth", `refresh token 已失效（${isInvalidRefreshToken(reason) ? "invalid" : reason}），凭据已标记 invalid，需 /login 重新授权`);
+      dlog("oauth", "refresh token 已失效，凭据已标记 invalid，需 /login 重新授权");
       await env.authNotifier?.notifyInvalid?.("refresh token invalid");
       throw new AuthRevokedError(`DeviantArt 登录已失效，需要重新授权（${reason}）`, { stage: "oauth-refresh", status: response.status });
     }
     throw new Error(
-      hasUserToken
+      hadUserToken
         ? `DeviantArt 登录已过期，请重新登录（${reason}）`
         : "DeviantArt 官方 API 凭据无效或已被拒绝，请检查 CLIENT_ID/CLIENT_SECRET",
     );
@@ -1734,4 +1809,11 @@ function isMediaHost(host) {
 function isHost(host, domain) {
   const value = host.toLowerCase();
   return value === domain || value.endsWith(`.${domain}`);
+}
+
+// 供 main.js 装配 AuthNotifier / OAuth 登录流程使用。
+export { telegram as sendTelegram };
+// Web OAuth 登录成功后调用：清掉短期 access token，下次成熟内容请求用新 refresh token 重新签发。
+export async function clearOAuthAccessToken() {
+  await cacheSet("api", "token", null, 1);
 }

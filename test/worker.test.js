@@ -797,3 +797,50 @@ test("splits media beyond 10 into multiple albums", async (t) => {
   assert.equal(groups[0].body.media.length, 10);
   assert.equal(groups[1].body.media.length, 1);
 });
+
+test("/status 与 /login：管理员可用、/status 不泄漏 secret、非管理员被拒", async (t) => {
+  const { handleUpdate } = await import("../src/index.js");
+  const originalFetch = globalThis.fetch;
+  t.after(installFakeCache());
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const sends = [];
+  globalThis.fetch = async (url, init = {}) => {
+    const u = String(url);
+    if (u.includes("api.telegram.org")) {
+      sends.push({ method: u.split("/").pop(), body: JSON.parse(init.body) });
+      return Response.json({ ok: true, result: { message_id: 1 } });
+    }
+    throw new Error("unexpected " + u);
+  };
+
+  const fakeStore = {
+    getState: () => ({ state: "valid", hasToken: true, updatedAt: "x" }),
+    getRefreshToken: () => "secret-refresh-token-123",
+  };
+  const fakeCookieStore = { available: () => true, getCookies: () => "auth=cookie-secret" };
+  const fakeAuthFlow = { configured: () => true, issueLoginToken: () => "one-time-abc" };
+  const env = {
+    BOT_TOKEN: "111:secret", WEBHOOK_SECRET: "secret",
+    ADMIN_IDS: "42", PUBLIC_BASE_URL: "https://bot.example.com",
+    credentialStore: fakeStore, cookieStore: fakeCookieStore, authFlow: fakeAuthFlow,
+    telepress: { mode: () => "large-gallery" },
+  };
+
+  // 管理员 /status
+  await handleUpdate({ update_id: 1, message: { message_id: 1, from: { id: 42 }, chat: { id: 42, type: "private" }, text: "/status" } }, env);
+  const status = sends.find((s) => s.method === "sendMessage")?.body.text || "";
+  assert.match(status, /DeviantDrop Status/);
+  assert.match(status, /OAuth: valid/);
+  assert.match(status, /TelePress: large-gallery/);
+  assert.doesNotMatch(status, /secret-refresh-token|cookie-secret|111:secret/, "/status 不得泄漏任何凭据");
+
+  // 管理员 /login：返回带一次性链接的按钮
+  await handleUpdate({ update_id: 2, message: { message_id: 2, from: { id: 42 }, chat: { id: 42, type: "private" }, text: "/login" } }, env);
+  const loginMsg = sends[sends.length - 1].body;
+  assert.match(loginMsg.reply_markup.inline_keyboard[0][0].url, /^https:\/\/bot\.example\.com\/auth\/deviantart\/start\?t=one-time-abc$/);
+
+  // 非管理员：被拒绝
+  await handleUpdate({ update_id: 3, message: { message_id: 3, from: { id: 99 }, chat: { id: 99, type: "private" }, text: "/status" } }, env);
+  const denied = sends[sends.length - 1].body.text;
+  assert.match(denied, /仅管理员可用/);
+});
