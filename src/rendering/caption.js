@@ -16,17 +16,18 @@ export function renderArtworkCaption(meta = {}, status = {}) {
   lines.push(`🎨 ${title}`);
   if (meta.author) lines.push(`👤 ${meta.author}`);
   if (Number.isInteger(meta.mediaCount) && meta.mediaCount > 1) {
-    lines.push(`🖼 ${meta.mediaCount} 张图片`);
+    lines.push(`🖼 ${meta.mediaCount} 个媒体`);
   }
   const notes = [];
   if (status.compressed) notes.push("部分图片超过 10MB，已压缩发送");
-  if (status.blurredPreview) notes.push("成熟内容附加页无法获取原图，仅发送首张未打码图");
+  if (status.blurredPreview) notes.push("部分成熟内容无法获取未打码画面，请在原站查看");
   if (status.previewOnly) notes.push("原图暂不可用，已使用高清展示图");
   if (status.docFallback) notes.push("图片过大，已作为文件发送");
   if (notes.length) lines.push(`⚠️ ${notes.join("；")}`);
   // 来源行：「DeviantArt」这几个字会被 text_link entity 指向作品页（见 sourceLinkEntity）。
-  lines.push("🔗 来源：DeviantArt");
-  return { text: lines.join("\n").slice(0, CAPTION_LIMIT) };
+  const source = "\n\n🔗 来源：DeviantArt";
+  const body = lines.join("\n").slice(0, CAPTION_LIMIT - source.length).replace(/[\uD800-\uDBFF]$/, "");
+  return { text: body + source };
 }
 
 // 计算「DeviantArt」来源文字的 text_link entity（offset 按 UTF-16 code unit，Telegram 规范）。

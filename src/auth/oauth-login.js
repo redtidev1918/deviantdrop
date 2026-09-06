@@ -7,7 +7,7 @@
 //   - OAuth state：crypto 随机、绑定 PKCE verifier、TTL 10 分钟、用完即删；
 //   - 全程不记录 code / access token / refresh token / client secret。
 
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 const AUTHORIZE = "https://www.deviantart.com/oauth2/authorize";
 const TOKEN = "https://www.deviantart.com/oauth2/token";
@@ -33,21 +33,21 @@ export class OAuthLoginFlow {
   }
 
   configured() {
-    return Boolean(this.clientId && this.redirectUri);
+    try { const u = new URL(this.redirectUri); return Boolean(this.clientId && u.protocol === "https:" && !u.username && !u.password); } catch { return false; }
   }
 
   // 管理员 /login：签发一次性 login token，拼出 /auth/deviantart/start 链接。
-  issueLoginToken() {
+  issueLoginToken(purpose = "oauth") {
     const token = b64url(randomBytes(32));
-    this.loginTokens.set(token, { createdAt: Date.now() });
+    this.loginTokens.set(token, { createdAt: Date.now(), purpose });
     this.gc();
     return token;
   }
 
   // 校验并消费一次性 login token（单次使用 + TTL）。
-  consumeLoginToken(token) {
+  consumeLoginToken(token, purpose = "oauth") {
     const rec = this.loginTokens.get(token);
-    if (!rec) return false;
+    if (!rec || rec.purpose !== purpose) return false;
     this.loginTokens.delete(token);
     if (Date.now() - rec.createdAt > LOGIN_TOKEN_TTL_MS) return false;
     return true;
@@ -79,13 +79,14 @@ export class OAuthLoginFlow {
 
   // /callback：严格校验 state，用 code + verifier 换 token，落盘 CredentialStore。
   async callback({ code, state, error }) {
-    if (error) throw Object.assign(new Error(`授权被拒绝：${error}`), { status: 400 });
     const rec = this.states.get(state);
     if (!rec) throw Object.assign(new Error("OAuth state 无效，请重新执行 /login。"), { status: 400 });
     this.states.delete(state);
     if (Date.now() - rec.createdAt > STATE_TTL_MS) {
       throw Object.assign(new Error("OAuth 登录已过期，请重新执行 /login。"), { status: 400 });
     }
+    if (error) throw Object.assign(new Error("授权被拒绝，请重新登录。"), { status: 400 });
+    if (!code || typeof code !== "string") throw Object.assign(new Error("缺少授权码，请重新登录。"), { status: 400 });
     const params = new URLSearchParams({
       grant_type: "authorization_code",
       code,
@@ -103,11 +104,10 @@ export class OAuthLoginFlow {
     });
     const data = await response.json().catch(() => null);
     if (!response.ok || !data?.refresh_token) {
-      const reason = data?.error_description || data?.error || `HTTP ${response.status}`;
-      throw Object.assign(new Error(`换取 DeviantArt token 失败：${reason}`), { status: 502 });
+      throw Object.assign(new Error("DeviantArt 授权交换失败，请重试。"), { status: 502 });
     }
     // 热生效：写入 CredentialStore（原子落盘），清 access-token 缓存由 onTokenSaved 处理。
-    this.credentialStore?.save(data.refresh_token);
+    this.credentialStore.save(data.refresh_token);
     await this.onTokenSaved?.();
     return { ok: true };
   }
@@ -117,14 +117,6 @@ export class OAuthLoginFlow {
     for (const [k, v] of this.loginTokens) if (now - v.createdAt > LOGIN_TOKEN_TTL_MS) this.loginTokens.delete(k);
     for (const [k, v] of this.states) if (now - v.createdAt > STATE_TTL_MS) this.states.delete(k);
   }
-}
-
-// constant-time 比较（预留，login token 已用 Map 删除保证单次使用）。
-export function safeEqual(a, b) {
-  const ba = Buffer.from(String(a));
-  const bb = Buffer.from(String(b));
-  if (ba.length !== bb.length) return false;
-  return timingSafeEqual(ba, bb);
 }
 
 export const LOGIN_HTML_OK = `<!doctype html><html lang="zh"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DeviantArt 登录成功</title>
@@ -137,4 +129,4 @@ export const LOGIN_HTML_FAIL = (message) => `<!doctype html><html lang="zh"><hea
 <style>body{font-family:-apple-system,system-ui,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0;background:#0b0e11;color:#e6edf3}
 .card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:32px 40px;text-align:center;max-width:420px}
 h1{font-size:20px;margin:0 0 8px}.x{color:#f85149;font-size:40px;margin-bottom:8px}p{color:#9da7b3;margin:8px 0}</style></head>
-<body><div class="card"><div class="x">✕</div><h1>DeviantArt 登录失败</h1><p>${String(message || "请回到 Telegram 重新执行 /login。").replace(/[<>]/g, "")}</p></div></body></html>`;
+<body><div class="card"><div class="x">✕</div><h1>DeviantArt 登录失败</h1><p>${String(message || "请回到 Telegram 重新执行 /login。").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;", "'":"&#39;"})[c])}</p></div></body></html>`;

@@ -14,8 +14,22 @@ on:
       - "Dockerfile"
       - "docker-compose.yml"
 
+concurrency:
+  group: vps-deploy
+  cancel-in-progress: false
+
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run check
   deploy:
+    needs: validate
     runs-on: ubuntu-latest
     steps:
       - name: Deploy to VPS
@@ -27,6 +41,12 @@ jobs:
           script: |
             set -e
             cd /opt/deviantdrop
-            git pull -q origin main
             export HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890
+            git pull --ff-only origin main
+            test "$(git rev-parse HEAD)" = "${{ github.sha }}"
             docker compose up -d --build
+            for attempt in 1 2 3 4 5; do
+              if curl -fsS http://127.0.0.1:8080/health; then exit 0; fi
+              sleep 2
+            done
+            exit 1

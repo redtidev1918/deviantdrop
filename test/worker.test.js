@@ -187,7 +187,7 @@ test("reports a missing artwork to the user", async (t) => {
     }),
   }), { BOT_TOKEN: "token", WEBHOOK_SECRET: "secret" });
 
-  assert.match(errorMessage, /作品不存在、已删除或链接无效/);
+  assert.match(errorMessage, /没有找到这个 DeviantArt 作品/);
 });
 
 test("backs off and retries a DeviantArt 429", async (t) => {
@@ -793,9 +793,10 @@ test("splits media beyond 10 into multiple albums", async (t) => {
   });
 
   const groups = sends.filter((s) => s.url.endsWith("sendMediaGroup"));
-  assert.equal(groups.length, 2); // 10 + 1 两张相册
+  assert.equal(groups.length, 1); // 10 张相册 + 1 张单图
   assert.equal(groups[0].body.media.length, 10);
-  assert.equal(groups[1].body.media.length, 1);
+  assert.equal(sends.filter(s=>s.url.endsWith("sendPhoto")).length, 1);
+  assert.ok(groups.every(s=>!s.body.reply_markup));
 });
 
 test("/status 与 /login：管理员可用、/status 不泄漏 secret、非管理员被拒", async (t) => {
@@ -823,7 +824,7 @@ test("/status 与 /login：管理员可用、/status 不泄漏 secret、非管�
     BOT_TOKEN: "111:secret", WEBHOOK_SECRET: "secret",
     ADMIN_IDS: "42", PUBLIC_BASE_URL: "https://bot.example.com",
     credentialStore: fakeStore, cookieStore: fakeCookieStore, authFlow: fakeAuthFlow,
-    telepress: { mode: () => "large-gallery" },
+    telepress: { mode: "large-gallery" },
   };
 
   // 管理员 /status
@@ -843,4 +844,56 @@ test("/status 与 /login：管理员可用、/status 不泄漏 secret、非管�
   await handleUpdate({ update_id: 3, message: { message_id: 3, from: { id: 99 }, chat: { id: 99, type: "private" }, text: "/status" } }, env);
   const denied = sends[sends.length - 1].body.text;
   assert.match(denied, /仅管理员可用/);
+});
+
+test('admin login is denied without configured admins and in public groups',async t=>{
+ const {handleUpdate}=await import('../src/index.js');const original=globalThis.fetch;t.after(()=>globalThis.fetch=original);t.after(installFakeCache());const sends=[];
+ globalThis.fetch=async(url,init)=>{sends.push(JSON.parse(init.body));return Response.json({ok:true,result:{message_id:1}});};
+ const env={BOT_TOKEN:'111:secret',WEBHOOK_SECRET:'secret',PUBLIC_BASE_URL:'https://bot.example',authFlow:{configured:()=>true,issueLoginToken:()=>{throw new Error('Must not issue');}}};
+ await handleUpdate({message:{from:{id:42},chat:{id:42,type:'private'},message_id:1,text:'/login'}},env);
+ assert.match(sends.at(-1).text,/仅管理员/);
+ await handleUpdate({message:{from:{id:42},chat:{id:-42,type:'supergroup'},message_id:1,text:'/login'}},{...env,ADMIN_IDS:'42'});
+ assert.match(sends.at(-1).text,/私聊/);
+ assert.ok(sends.every(s=>!s.reply_markup));
+});
+
+test('TelePress large-gallery hook publishes once, and failure leaves Telegram delivery intact',async t=>{
+ const {handleUpdate}=await import('../src/index.js');const {TelePress}=await import('../src/publishing/telepress.js');const original=globalThis.fetch;t.after(()=>globalThis.fetch=original);t.after(installFakeCache());
+ let publications=0,albums=0;const replies=[];let fail=false;
+ globalThis.fetch=async(input,init={})=>{
+  const url=String(input);
+  if(url==='https://www.deviantart.com/')return new Response("window.__CSRF_TOKEN__ = 'csrf'");
+  if(url.includes('/_puppy/dadeviation/init'))return Response.json({deviation:{title:'gallery',isMultiMedia:true,media:{baseUri:'https://images.wixmp.com/main.jpg',token:'t'},extended:{additionalMedia:Array.from({length:10},(_,i)=>({media:{baseUri:`https://images.wixmp.com/${i}.jpg`,token:'t'}}))}}});
+  if(url.includes('images.wixmp.com'))return new Response('image',{headers:{'Content-Type':'image/jpeg'}});
+  if(url.includes('telepress.example')){publications++;return fail?new Response('error',{status:503}):Response.json({url:'https://telegra.ph/gallery'});}
+  const method=url.split('/').pop();
+  const body=init.body instanceof FormData?Object.fromEntries(init.body):JSON.parse(init.body);
+  replies.push(body);
+  if(method==='sendMediaGroup'){albums++;return Response.json({ok:true,result:Array.from({length:10},()=>({photo:[{file_id:'id'}]}))});}
+  return Response.json({ok:true,result:{message_id:1,photo:[{file_id:'id'}]}});
+ };
+ const mem=new Map();const client=new TelePress({url:'https://telepress.example',mode:'large-gallery',cacheGet:async(ns,k)=>mem.get(k),cacheSet:async(ns,k,v)=>mem.set(k,v)});
+ const env={BOT_TOKEN:'111:secret',WEBHOOK_SECRET:'secret',telepress:client};
+ const msg={from:{id:42},chat:{id:987,type:'private'},message_id:1,text:'https://www.deviantart.com/artist/art/gallery-7654321'};
+ await handleUpdate({message:msg},env);await handleUpdate({message:msg},env);
+ assert.equal(publications,1);assert.equal(albums,2);
+ assert.ok(replies.some(r=>r.reply_markup?.inline_keyboard?.[0]?.some(b=>b.url==='https://telegra.ph/gallery')));
+ fail=true;mem.clear();await handleUpdate({message:{...msg,chat:{id:986,type:'private'}}},env);
+ assert.equal(albums,3);assert.ok(!replies.some(r=>r.text?.includes('处理失败')));
+});
+
+test('cookie update replaces a cached authenticated session without restarting',async t=>{
+ const {handleUpdate}=await import('../src/index.js');const original=globalThis.fetch;t.after(()=>globalThis.fetch=original);t.after(installFakeCache());
+ let cookie='auth=old';const homes=[];const initCookies=[];
+ globalThis.fetch=async(input,init={})=>{
+  const url=String(input);
+  if(url==='https://www.deviantart.com/'){homes.push(new Headers(init.headers).get('Cookie'));return new Response("window.__CSRF_TOKEN__ = 'csrf'");}
+  if(url.includes('/_puppy/dadeviation/init')){initCookies.push(new Headers(init.headers).get('Cookie'));return Response.json({deviation:{title:'cookie',media:{baseUri:'https://images.wixmp.com/a.jpg',token:'t'}}});}
+  if(url.includes('images.wixmp.com'))return new Response('image');
+  return Response.json({ok:true,result:{message_id:1}});
+ };
+ const env={BOT_TOKEN:'111:secret',WEBHOOK_SECRET:'secret',cookieStore:{getCookies:()=>cookie}};
+ const message=id=>({chat:{id:789,type:'private'},message_id:1,text:`https://www.deviantart.com/artist/art/cookie-${id}`});
+ await handleUpdate({message:message(1)},env);cookie='auth=new';await handleUpdate({message:message(2)},env);
+ assert.deepEqual(homes,['auth=old','auth=new']);assert.deepEqual(initCookies,homes);
 });

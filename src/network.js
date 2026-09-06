@@ -39,7 +39,7 @@ export function createProxyFetch(proxyAgent, directAgent, nativeFetch = globalTh
       if (secondary && code && !isAborted(error, init?.signal)) {
         const from = isMedia ? "直连" : "代理";
         const to = isMedia ? "代理" : "直连";
-        console.error(`[net] ${from}连接失败(${code})，切${to}重试: ${url.hostname}${url.pathname.slice(0, 48)}`);
+        console.error(`[net] ${from}连接失败(${code})，切${to}重试: ${url.hostname}`);
         return nativeFetch(input, { ...init, dispatcher: secondary });
       }
       throw error;

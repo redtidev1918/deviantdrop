@@ -132,7 +132,7 @@ Cookie 会过期且无法自动续期；用 OAuth 登录一次，Bot 之后自�
 
 在 GitHub 仓库 Settings → Secrets and variables → Actions 里添加三个 secret：
 
-- `VPS_HOST` = `114.55.249.249`
+- `VPS_HOST` = `your-server.example`
 - `VPS_USER` = `root`
 - `VPS_SSH_KEY` = 部署用私钥内容（推荐单独生成一把）
 
@@ -140,7 +140,7 @@ Cookie 会过期且无法自动续期；用 OAuth 登录一次，Bot 之后自�
 
 ```bash
 ssh-keygen -t ed25519 -f ~/.ssh/deviantdrop_deploy -N ""
-ssh-copy-id -i ~/.ssh/deviantdrop_deploy.pub root@114.55.249.249
+ssh-copy-id -i ~/.ssh/deviantdrop_deploy.pub root@your-server.example
 cat ~/.ssh/deviantdrop_deploy        # 内容贴进 VPS_SSH_KEY
 ```
 

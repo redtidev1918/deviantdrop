@@ -31,12 +31,12 @@ test("fallback 模式：Telegram 失败时允许兜底", () => {
 
 test("publishGallery：成功返回 url 并缓存，第二次命中缓存不重复请求", async () => {
   let calls = 0;
-  const fetchImpl = async () => { calls++; return Response.json({ url: "http://telegra.ph/abc", ok: true }); };
+  const fetchImpl = async () => { calls++; return Response.json({ url: "https://telegra.ph/abc", ok: true }); };
   const cache = memCache();
   const t = new TelePress({ url: "http://127.0.0.1:9000", mode: "large-gallery", fetchImpl, ...cache });
   const files = Array.from({ length: 11 }, (_, i) => ({ data: new Uint8Array([i]), filename: `i${i}.jpg` }));
   const r1 = await t.publishGallery({ deviationId: "777", files, title: "set", link: "https://da/x" });
-  assert.equal(r1.url, "http://telegra.ph/abc");
+  assert.equal(r1.url, "https://telegra.ph/abc");
   assert.equal(r1.cached, false);
   const r2 = await t.publishGallery({ deviationId: "777", files, title: "set" });
   assert.equal(r2.cached, true);
@@ -59,7 +59,7 @@ test("publishGallery：网络异常时吞掉返回 null", async () => {
 
 test("publishGallery：携带 Bearer 鉴权头", async () => {
   let seen = null;
-  const fetchImpl = async (url, init) => { seen = init.headers; return Response.json({ url: "http://telegra.ph/z" }); };
+  const fetchImpl = async (url, init) => { seen = init.headers; return Response.json({ url: "https://telegra.ph/z" }); };
   const t = new TelePress({ url: "http://127.0.0.1:9000", apiKey: "k123", mode: "always", fetchImpl, ...memCache() });
   await t.publishGallery({ deviationId: "1", files: [{ data: new Uint8Array([1]) }] });
   assert.equal(seen.Authorization, "Bearer k123");

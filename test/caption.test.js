@@ -28,7 +28,7 @@ test("caption 排版：标题/作者/数量分行，warning 独立成行不粘�
   );
   assert.match(text, /🎨 T/);
   assert.match(text, /👤 A/);
-  assert.match(text, /🖼 6 张图片/);
+  assert.match(text, /🖼 6 个媒体/);
   // warning 是单独一行（⚠️），不会贴在链接或标题后面
   assert.match(text, /⚠️ 部分图片超过 10MB，已压缩发送；原图暂不可用，已使用高清展示图/);
   assert.match(text, /来源：DeviantArt/);
@@ -71,3 +71,10 @@ test("buildCapFromMedia：拆分 '标题 — 作者'，计算 mediaCount", () =>
   assert.equal(cap.mediaCount, 4); // 主图 + 2 extras + 1 skipped
   assert.equal(cap.sourceUrl, "https://www.deviantart.com/x");
 });
+
+ test('长标题仍保留完整来源 entity', () => {
+ const {text}=renderArtworkCaption({title:'😀'.repeat(1000)});
+ assert.ok(text.length<=1024);
+ const entity=sourceLinkEntity(text,'https://www.deviantart.com/a/art/b-1');
+ assert.equal(text.slice(entity.offset,entity.offset+entity.length),'DeviantArt');
+ });

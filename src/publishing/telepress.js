@@ -29,7 +29,7 @@ export class TelePress {
 
   // 图片数量是否达到「大图集」主动建页门槛。
   shouldPublishLargeGallery(imageCount) {
-    return this.enabled() && (this.mode === "large-gallery" || this.mode === "always") && imageCount > LARGE_GALLERY_THRESHOLD;
+    return this.enabled() && (this.mode === "always" || (this.mode === "large-gallery" && imageCount > LARGE_GALLERY_THRESHOLD));
   }
 
   // Telegram 失败时是否允许兜底。
@@ -55,9 +55,9 @@ export class TelePress {
   // 返回 { url } 或 null（失败/未启用）。永不抛出（兜底语义）。
   async publishGallery({ deviationId, title = "", files = [], link = "", tags = "" } = {}) {
     if (!this.enabled()) return null;
-    const cached = await this.getCachedUrl(deviationId);
-    if (cached) return { url: cached, cached: true };
     try {
+      const cached = await this.getCachedUrl(deviationId);
+      if (cached) return { url: cached, cached: true };
       const form = new FormData();
       files.forEach((f, i) => {
         const blob = new Blob([f.data], { type: f.contentType || "image/jpeg" });
@@ -75,14 +75,15 @@ export class TelePress {
         signal: AbortSignal.timeout(120_000),
       });
       const data = await response.json().catch(() => null);
-      if (!response.ok || !data?.url) {
-        console.error("TelePress publish 失败:", response.status, data?.detail || data?.status || "");
+      const published = data?.url && new URL(data.url);
+      if (!response.ok || !published || published.protocol !== "https:" || published.username || published.password) {
+        console.error("TelePress publish 失败:", response.status);
         return null;
       }
       await this.setCachedUrl(deviationId, data.url);
       return { url: data.url, cached: false };
     } catch (error) {
-      console.error("TelePress publish 异常（不影响 Telegram 发送）:", error instanceof Error ? error.message : String(error));
+      console.error("TelePress publish 异常（不影响 Telegram 发送）");
       return null;
     }
   }

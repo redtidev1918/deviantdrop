@@ -48,7 +48,7 @@ test("GET /auth/deviantart/callback?code&state → 换 token 成功并返回成�
   const t = flow.issueLoginToken();
   const authRes = await handler(new Request(`https://bot.example.com/auth/deviantart/start?t=${t}`));
   const state = new URL(authRes.headers.get("location")).searchParams.get("state");
-  const res = await handler(new Request(`https://bot.example.com/auth/deviantart/callback?code=thecode&state=${state}`));
+  const res = await handler(new Request(`https://bot.example.com/auth/deviantart/callback?code=thecode&state=${state}`, {headers:{Cookie:`dd_oauth=${state}`}}));
   assert.equal(res.status, 200);
   const body = await res.text();
   assert.match(body, /登录成功/);
@@ -61,7 +61,7 @@ test("callback 错误（用户拒绝授权）返回失败 HTML，不泄漏 secre
   const t = flow.issueLoginToken();
   const authRes = await handler(new Request(`https://bot.example.com/auth/deviantart/start?t=${t}`));
   const state = new URL(authRes.headers.get("location")).searchParams.get("state");
-  const res = await handler(new Request(`https://bot.example.com/auth/deviantart/callback?error=access_denied&state=${state}`));
+  const res = await handler(new Request(`https://bot.example.com/auth/deviantart/callback?error=access_denied&state=${state}`, {headers:{Cookie:`dd_oauth=${state}`}}));
   const body = await res.text();
   assert.match(body, /登录失败/);
   assert.doesNotMatch(body, /client_secret|refresh_token|csec/);

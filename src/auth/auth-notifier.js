@@ -18,23 +18,30 @@ export class AuthNotifier {
     this.loginUrlBuilder = loginUrlBuilder;
   }
 
-  async buildLoginUrl() {
+  async buildLoginUrl(kind) {
     try {
-      if (this.loginUrlBuilder) return (await this.loginUrlBuilder()) || this.loginUrl;
+      if (this.loginUrlBuilder) return (await this.loginUrlBuilder(kind)) || this.loginUrl;
     } catch { /* 落回静态链接 */ }
     return this.loginUrl;
   }
 
-  async notifyInvalid(reason = "refresh token invalid") {
+  async notifyInvalid(reason = "refresh token invalid", kind = "oauth") {
+    if (this.notifying) return this.notifying;
+    this.notifying = this.sendInvalid(reason, kind);
+    try { await this.notifying; } finally { this.notifying = null; }
+  }
+
+  async sendInvalid(reason, kind) {
     try {
-      if (await this.cacheGet("auth", "notice:invalid")) return; // 冷却中
-      await this.cacheSet("auth", "notice:invalid", true, COOLDOWN_SECONDS);
-      const url = await this.buildLoginUrl();
+      if (await this.cacheGet("auth", `notice:invalid:${kind}`)) return; // 冷却中
+      if (!this.adminIds.length) return;
+      const url = await this.buildLoginUrl(kind);
       const keyboard = url
-        ? { inline_keyboard: [[{ text: "重新登录 DeviantArt", url }]] }
+        ? { inline_keyboard: [[{ text: kind === "cookie" ? "更新 Cookie" : "重新登录 DeviantArt", url }]] }
         : undefined;
       const text =
         "⚠️ DeviantArt 登录已失效\n\n" +
+        (kind === "cookie" ? "原因：Cookie 会话已失效，请使用 /cookies 更新。\n" : "原因：refresh token invalid。\n") +
         "成熟内容和部分登录后资源可能只能获得公开预览。\n" +
         "在 Telegram 对 Bot 发送 /login 即可重新授权（无需重启）。";
       for (const chatId of this.adminIds) {
@@ -44,16 +51,17 @@ export class AuthNotifier {
           disable_notification: false,
         });
       }
+      await this.cacheSet("auth", `notice:invalid:${kind}`, true, COOLDOWN_SECONDS);
     } catch {
       // 通知失败不影响主链路。
     }
   }
 
-  async notifyRecovered() {
+  async notifyRecovered(kind = "oauth", force = false) {
     try {
-      const wasNotified = await this.cacheGet("auth", "notice:invalid");
-      await this.cacheSet("auth", "notice:invalid", null, 1); // 清冷却
-      if (!wasNotified) return; // 之前没报过失效就不打扰
+      const wasNotified = await this.cacheGet("auth", `notice:invalid:${kind}`);
+      await this.cacheSet("auth", `notice:invalid:${kind}`, null, 1); // 清冷却
+      if (!wasNotified && !force) return; // 之前没报过失效就不打扰
       for (const chatId of this.adminIds) {
         await this.sendTelegram?.("sendMessage", {
           chat_id: chatId,

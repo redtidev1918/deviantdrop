@@ -82,5 +82,11 @@ export function publicError(error) {
     return "Telegram 无法读取该媒体，作品可能受限或媒体格式不受支持";
   }
   if (/timeout|timed out|abort/i.test(message)) return "请求超时，请稍后重试";
-  return message.slice(0, 300);
+  if (/[\u3400-\u9fff]/.test(message) && !/(?:token|cookie|secret)=|bot\d+:/i.test(message)) return message.slice(0, 300);
+  return "服务暂时无法完成该请求，请稍后重试。";
+}
+
+export function failureText(error) {
+  const category = error instanceof AuthError ? "登录提示" : error instanceof PermissionDeniedError ? "访问受限" : error instanceof NotFoundError ? "未找到作品" : error instanceof RateLimitError ? "请求限流" : error instanceof NetworkError ? "连接失败" : "处理失败";
+  return `${category}：${publicError(error)}`;
 }

@@ -1,7 +1,10 @@
 const TELEGRAM_API = "https://api.telegram.org";
 const DEVIANTART = "https://www.deviantart.com/";
-import { renderArtworkCaption, sourceLinkEntity, openButtonMarkup as buildOpenMarkup, sourceLineText, buildCapFromMedia } from "./rendering/caption.js";
-import { AuthRevokedError, publicError } from "./auth/errors.js";
+import { renderArtworkCaption, sourceLinkEntity, openButtonMarkup as buildOpenMarkup, buildCapFromMedia } from "./rendering/caption.js";
+import { publishArtwork } from "./publishing/gallery.js";
+import { fetchPublicMedia } from "./preview/server.js";
+import { getOfficialToken, clearOAuthAccessToken } from "./auth/token.js";
+import { AuthError, CookieExpiredError, PermissionDeniedError, RateLimitError, NetworkError, NotFoundError, publicError, failureText } from "./auth/errors.js";
 // 浏览器 UA：DeviantArt 的 WAF 会拦明显的爬虫 UA（尤其是数据中心出口 IP）。
 const USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 const MAX_LINKS = 5;
@@ -27,7 +30,6 @@ const RATE_MAX_LINKS = 15; // 每个聊天每分钟最多处理的链接数
 const RATE_TEXT = `操作太快了：这个聊天每分钟最多处理 ${RATE_MAX_LINKS} 个作品链接，请稍后再试。`;
 
 // —— 官方 OAuth API（DA 的 WAF 按出口 IP 封锁网页接口，官方 API 面放行；部署必须走这条）——
-const DA_TOKEN_URL = "https://www.deviantart.com/oauth2/token";
 const DA_API_BASE = "https://www.deviantart.com/api/v1/oauth2/";
 const DA_MINOR_VERSION = "20240701";
 
@@ -39,48 +41,22 @@ function shortUrl(value) {
   const s = String(value || "");
   try { const u = new URL(s); return `${u.host}${u.pathname}`.slice(0, 90); } catch { return s.slice(0, 90); }
 }
-// 从 caption 末尾提取作品页链接（旧逻辑残留；新渲染路径改为显式传 sourceUrl）。
-function extractPageUrl(caption) {
-  const match = String(caption).match(/(https?:\/\/[^\s]+)$/);
-  return match ? match[1] : null;
-}
-// 单媒体 inline 键盘（相册 sendMediaGroup 会静默丢弃，仅单张使用）。
-function openButtonMarkup(pageUrl) {
-  const reply_markup = buildOpenMarkup(pageUrl);
-  return reply_markup ? { reply_markup } : null;
-}
-// Telegram 的 sendMediaGroup（相册）会静默丢弃 inline_keyboard：实测请求里带了
-// reply_markup，返回的消息却没有（单张 sendPhoto 才支持内联按钮）。所以相册发完后
-// 补一条「打开」入口消息；链接用 text_link entity 承载（不粘连括号，点击可靠），
-// 同时带按钮双保险。补发失败不影响作品本身。
-async function sendAlbumOpenLink(message, pageUrl, env) {
-  if (!pageUrl) return;
-  try {
-    const { text, entities } = sourceLineText(pageUrl);
-    await telegram(env, "sendMessage", {
-      chat_id: message.chat.id,
-      text,
-      entities,
-      reply_markup: { inline_keyboard: [[{ text: "在 DeviantArt 打开", url: pageUrl }]] },
-      reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
-      ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
-      disable_notification: true,
-    });
-  } catch (error) {
-    dlog("send", `相册打开按钮补发失败: ${error instanceof Error ? error.message : String(error)}`);
-  }
+async function sendPublishedLink(message, env, id, sourceUrl, publishedUrl) {
+  if (!publishedUrl) return;
+  await telegram(env, "sendMessage", {
+    chat_id: message.chat.id,
+    text: "在 Telegraph 查看全部",
+    entities: [{ type: "text_link", offset: 0, length: "在 Telegraph 查看全部".length, url: publishedUrl }],
+    reply_markup: buildOpenMarkup(sourceUrl, [{ text: "在 Telegraph 查看全部", url: publishedUrl }]),
+    reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+    ...(message.message_thread_id ? {message_thread_id:message.message_thread_id} : {}),
+    ...(env.PUBLIC_BASE_URL ? {link_preview_options:{url:`${env.PUBLIC_BASE_URL}/d/${id}`,prefer_large_media:true,show_above_text:false}} : {}),
+  });
 }
 // PREFER_ORIGINAL=1 才优先抓原图（默认关闭：免费账号原图有日配额，常 403/429）。
 function preferOriginal(env) {
   return /^(1|true|yes)$/i.test(String(env?.PREFER_ORIGINAL || ""));
 }
-// DA 把失效/吊销的 refresh token 报成 invalid_request + "refresh_token is invalid"，
-// 而非 RFC 的 invalid_grant：归一化识别（参考 deviantart-downloader oauth.py）。
-function isInvalidRefreshToken(message) {
-  const normalized = String(message || "").replace(/_/g, " ").toLowerCase();
-  return normalized.includes("invalid_grant") || (normalized.includes("refresh") && normalized.includes("invalid"));
-}
-
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -90,6 +66,7 @@ export default {
     if (request.method === "GET" && url.pathname === "/health") {
       return Response.json({ ok: true, service: "deviantdrop" });
     }
+    if (url.pathname.startsWith("/d/") && env.preview) return env.preview.handle(request);
     // Web OAuth 登录（/auth/deviantart/start|callback）：由 main.js 装配的 env.handleAuthRequest 处理。
     // poll 与 webhook 模式都会启动 HTTP server，因此该路由两种模式都可用。
     if (url.pathname.startsWith("/auth/")) {
@@ -138,11 +115,11 @@ export async function handleUpdate(update, env, origin = null) {
   try {
     await handleMessage(message, env, origin);
   } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
+    console.error("update failed", error?.name || "Error", error?.stage || "handler");
     try {
       await telegram(env, "sendMessage", {
         chat_id: message.chat.id,
-        text: `处理失败：${publicError(error)}`,
+        text: failureText(error),
         reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
         ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
       });
@@ -171,7 +148,7 @@ async function handleMessage(message, env, origin) {
   }
 
   // 管理员命令：/login（Web OAuth 重新授权）、/status（各组件状态）。
-  const adminCommand = (message.text ?? "").match(/^\/(login|status)(?:@\w+)?(?:\s|$)/i)?.[1]?.toLowerCase();
+  const adminCommand = (message.text ?? "").match(/^\/(login|status|cookies)(?:@\w+)?(?:\s|$)/i)?.[1]?.toLowerCase();
   if (adminCommand) {
     await handleAdminCommand(adminCommand, message, env);
     return;
@@ -275,7 +252,7 @@ async function handleMessage(message, env, origin) {
       } catch (error) {
         await telegram(env, "sendMessage", {
           chat_id: message.chat.id,
-          text: `${pending.length > 1 ? `第 ${index + 1} 个链接` : ""}处理失败：${publicError(error)}`,
+          text: `${pending.length > 1 ? `第 ${index + 1} 个链接：` : ""}${failureText(error)}`,
           reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
           ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
         });
@@ -312,8 +289,20 @@ async function handleAdminCommand(command, message, env) {
 
   // 门禁：管理员列表非空时，非管理员不可用。ADMIN_IDS 优先，否则回退 ALLOWED_USER_IDS。
   const adminIds = String(env.ADMIN_IDS || env.ALLOWED_USER_IDS || "").split(",").map((s) => s.trim()).filter(Boolean);
-  if (adminIds.length && !adminIds.includes(String(message.from?.id ?? ""))) {
+  if (!adminIds.includes(String(message.from?.id ?? ""))) {
     await send("这个命令仅管理员可用。");
+    return;
+  }
+
+  if (message.chat.type !== "private") {
+    await send("请在私聊中使用管理命令。");
+    return;
+  }
+
+  if (command === "cookies") {
+    if (!env.PUBLIC_BASE_URL || !env.cookieStore) { await send("Cookie 管理入口未配置 PUBLIC_BASE_URL。"); return; }
+    const token = env.authFlow.issueLoginToken("cookies");
+    await send("通过浏览器表单更新 Cookie，无需重启。", { reply_markup: { inline_keyboard: [[{ text: "更新 Cookie", url: `${env.PUBLIC_BASE_URL}/auth/deviantart/cookies?t=${token}` }]] } });
     return;
   }
 
@@ -338,16 +327,16 @@ async function handleAdminCommand(command, message, env) {
       ? (authState.state === "valid" && authState.hasToken ? "valid（已登录）" : authState.state === "invalid" ? "invalid（需 /login）" : "absent（未登录）")
       : (env.DA_REFRESH_TOKEN ? "env 配置" : "未配置");
     const cookieText = env.cookieStore ? (env.cookieStore.available() ? "available" : "none") : (env.DA_COOKIES ? "env 配置" : "none");
-    const teleText = env.telepress ? env.telepress.mode() : "disabled";
+    const teleText = env.telepress ? env.telepress.mode : "disabled";
     const lines = [
       "DeviantDrop Status",
       "",
       `Telegram: OK`,
-      `DeviantArt Web: 运行中`,
+      `DeviantArt Web: 按请求检查`,
       `OAuth: ${authText}`,
       `Cookie: ${cookieText}`,
       `TelePress: ${teleText}`,
-      `Cache: OK`,
+      `Cache: ${cacheApi() ? "已配置" : "未配置"}`,
     ];
     await send(lines.join("\n"));
     return;
@@ -404,7 +393,7 @@ function currentDaCookies(env) {
 // 注入登录会话（用于成熟内容），并单独缓存避免与匿名 csrf 串用。
 async function getDeviantArtSession(env) {
   const cookies = currentDaCookies(env);
-  const key = cookies ? "session:auth" : "session";
+  const key = cookies ? `session:${await hmac(cookies, env.WEBHOOK_SECRET)}` : "session";
   const cached = await cacheGet("da", key);
   if (cached?.csrf) return cached;
   const session = await createDeviantArtSession(env);
@@ -430,6 +419,13 @@ async function createDeviantArtSession(env) {
   const cookies = currentDaCookies(env);
   if (cookies) headers.Cookie = cookies;
   const home = await fetchDeviantArt(DEVIANTART, { headers });
+  if (cookies && (home.status === 401 || /\/users\/login(?:[/?]|$)/.test(home.url || ""))) {
+    await home.body?.cancel();
+    if (!env.cookieStore) throw new CookieExpiredError();
+    env.cookieStore.clear();
+    await env.authNotifier?.notifyInvalid("cookie expired", "cookie");
+    return createDeviantArtSession(env);
+  }
   await throwForDeviantArtStatus(home);
   const html = await home.text();
   const csrf = html.match(/window\.__CSRF_TOKEN__ = '([^']+)'/)?.[1];
@@ -448,59 +444,48 @@ async function sendDeviantArt(url, message, env, origin, sessionMemo = {}, onSta
     dlog("send", `replay album id=${target.id} files=${cached.files.length}`);
     // 重放也用统一渲染：caption 无裸 URL，来源用 text_link；相册另补发入口消息。
     const { capTitle, capAuthor } = splitTitleAuthor(cached.title);
-    const replayCap = capObject({ title: capTitle, author: capAuthor, sourceUrl: url.href, mediaCount: cached.files.length });
+    const replayCap = cached.cap ? { ...cached.cap, sourceUrl: url.href } : capObject({ title: capTitle, author: capAuthor, sourceUrl: url.href, mediaCount: cached.files.length });
     await sendAlbumByFileIds(cached.files, "", message, env, replayCap);
-    await sendAlbumOpenLink(message, url.href, env);
     return;
   }
   if (cached?.file_id) {
     dlog("send", `replay file id=${target.id} kind=${cached.kind}`);
     const { capTitle, capAuthor } = splitTitleAuthor(cached.title);
-    const replayCap = capObject({ title: capTitle, author: capAuthor, sourceUrl: url.href });
+    const replayCap = cached.cap ? { ...cached.cap, sourceUrl: url.href } : capObject({ title: capTitle, author: capAuthor, sourceUrl: url.href });
     await sendFileById(cached.kind, cached.file_id, "", message, env, replayCap);
     return;
   }
+  let media;
   try {
-    const media = await resolveWebMedia(url, env, origin, sessionMemo);
-    dlog("send", `web ok id=${target.id} kind=${media.kind} url=${shortUrl(media.url)} display=${shortUrl(media.display)} displayBlur=${/blur_/.test(media.display || "")} matureBlurred=${!!media.matureBlurred}`);
-    // cap：统一 caption/按钮渲染（来源用 text_link，不再把裸 URL 拼进文字）。
-    // 成熟作品附加页跳过/登录过期 → 初始 status；下载阶段的压缩等由发送函数补充。
-    const cap = buildCapFromMedia(media, url.href);
-    if (media.skippedExtras > 0) cap.status = { ...(cap.status || {}), blurredPreview: true };
-    if (media.matureBlurred) cap.status = { ...(cap.status || {}), blurredPreview: true };
-    const items = [{ kind: media.kind, url: media.url, display: media.display }, ...(media.extras || [])];
-    // 多文件作品：主图 + 附加图合并成一条 Telegram 相册（≤10、仅 photo/video 时）；
-    // 否则退回单图发送（此时记得 file_id 供后续去重）
-    if (items.length > 1 && items.every((it) => it.kind === "photo" || it.kind === "video")) {
-      // 超过 10 张切成多条相册（每条约 10 张），避免退化成逐条单发
-      const chunks = [];
-      for (let i = 0; i < items.length; i += 10) chunks.push(items.slice(i, i + 10));
-      for (let ci = 0; ci < chunks.length; ci += 1) {
-        const albumCap = ci === 0 ? cap : null;
-        const albumResults = await sendAlbum(chunks[ci], "", message, env, !origin, onStatus, albumCap);
-        if (chunks.length === 1) await rememberAlbumFileIds(target.id, media.title, albumResults, env);
-      }
-      // 相册不支持内联按钮（sendMediaGroup 会静默吞掉），补发一条带「打开」入口的消息。
-      await sendAlbumOpenLink(message, url.href, env);
+    media = await resolveWebMedia(url, env, null, sessionMemo);
+  } catch (error) {
+    if (!env.CLIENT_ID || !env.CLIENT_SECRET || !(error instanceof NetworkError) && !/连接失败|超时|无法连接/.test(error.message)) throw error;
+    media = await resolveOfficialMedia(url, env, null);
+  }
+  const cap = buildCapFromMedia(media, url.href);
+  if (media.skippedExtras > 0 || media.matureBlurred) cap.status = { ...cap.status, blurredPreview: true };
+  try { await env.preview?.remember({id:target.id,...cap}); } catch { /* preview must not block delivery */ }
+  const rawItems=[{kind:media.kind,url:media.url,display:media.display},...(media.extras||[])];
+  const items=await Promise.all(rawItems.map(async item=>({...item,url:await createProxyUrl(origin,item.url,env.WEBHOOK_SECRET)})));
+  try {
+    if(items.length>1 && items.every(i=>i.kind==='photo'||i.kind==='video')) {
+      const results=[];
+      for(let i=0;i<items.length;i+=10) results.push(...await sendAlbum(items.slice(i,i+10),'',message,env,!origin,onStatus,cap));
+      if(items.length<=10)await rememberAlbumFileIds(target.id,media.title,results,env,cap);
     } else {
-      const sent = await sendOne(media.kind, media.url, "", message, env, !origin, onStatus, media.display, cap);
-      if (items.length === 1) await rememberFileId(target.id, media.kind, media.title, sent, env);
-      for (const extra of media.extras || []) {
-        await sendOne(extra.kind, extra.url, "", message, env, !origin, onStatus, extra.display, { ...cap, mediaCount: undefined, text: null });
+      for(const item of items){
+        const result=await sendOne(item.kind,item.url,'',message,env,!origin,onStatus,item.display,cap);
+        if(items.length===1)await rememberFileId(target.id,item.kind,media.title,result,env,cap);
       }
     }
+  } catch(error) {
+    const published=await publishArtwork(env,target.id,media,url.href,true);
+    if(!published)throw error;
+    await sendPublishedLink(message,env,target.id,url.href,published);
     return;
-  } catch (error) {
-    const text = error instanceof Error ? error.message : String(error);
-    // 只有“网络/超时”类失败才值得换官方通道重试；403/404/内容类错误如实抛出，
-    // 否则会把“需要登录/未收录”误报成存档缺失。
-    if (!env.CLIENT_ID || !env.CLIENT_SECRET || !/连接失败|超时|无法连接/.test(text)) throw error;
-    console.error("网页解析失败(网络)，转官方 API:", text);
   }
-  const official = await resolveOfficialMedia(url, env, origin);
-  const oCap = buildCapFromMedia({ title: official.title }, url.href);
-  const sent = await sendOne(official.kind, official.url, "", message, env, !origin, onStatus, null, oCap);
-  await rememberFileId(target.id, official.kind, official.title, sent, env);
+  const published=await publishArtwork(env,target.id,media,url.href);
+  if(published){try{await sendPublishedLink(message,env,target.id,url.href,published);}catch{/* optional action */}}
 }
 
 // "标题 — 作者" 拆回标题/作者（供 file_id 重放时重建 cap）。
@@ -519,8 +504,7 @@ async function resolveTargetUsername(url, env) {
   try {
     const response = await fetch(url, {
       headers: { ...DA_HEADERS, Accept: "text/html" },
-      redirect: "follow",
-      signal: AbortSignal.timeout(8_000),
+        signal: AbortSignal.timeout(8_000),
     });
     const finalUrl = response.url || url.href;
     response.body?.cancel();
@@ -542,6 +526,8 @@ async function resolveWebMedia(url, env, origin, sessionMemo) {
   }
   // CSRF 会话有效期较短，缓存的 csrf 可能已过期导致 init 400：过期时清缓存换新会话重试一次。
   for (let attempt = 0; ; attempt += 1) {
+    const cookieRevision = currentDaCookies(env);
+    if (sessionMemo.cookieRevision !== cookieRevision) { sessionMemo.session = null; sessionMemo.cookieRevision = cookieRevision; }
     if (!sessionMemo.session) sessionMemo.session = await getDeviantArtSession(env);
     const session = sessionMemo.session;
     try {
@@ -649,7 +635,8 @@ async function resolveWebMedia(url, env, origin, sessionMemo) {
       const text = error instanceof Error ? error.message : String(error);
       if (attempt === 0 && /HTTP 400/.test(text)) {
         // csrf 过期/被抢占：清掉缓存会话，下一次循环用新会话重试
-        const key = currentDaCookies(env) ? "session:auth" : "session";
+        const cookie = currentDaCookies(env);
+        const key = cookie ? `session:${await hmac(cookie, env.WEBHOOK_SECRET)}` : "session";
         await cacheSet("da", key, null, 1);
         sessionMemo.session = null;
         console.error("init 400，刷新会话重试:", text);
@@ -779,11 +766,11 @@ async function guardedFetch(url, init, label) {
   try {
     return await fetch(url, init);
   } catch {
-    throw new Error(`${label}连接失败或超时，请稍后再试`);
+    throw new NetworkError(`${label}连接失败或超时，请稍后再试`);
   }
 }
 
-async function officialApiGet(env, path) {
+async function officialApiGet(env, path, retried = false) {
   const endpoint = new URL(path, DA_API_BASE);
   endpoint.searchParams.set("mature_content", "true");
   const headers = {
@@ -794,84 +781,17 @@ async function officialApiGet(env, path) {
   const response = await guardedFetch(endpoint, { headers, signal: AbortSignal.timeout(20_000) }, "DeviantArt 官方 API");
   if (response.status === 401) {
     // token 失效：清缓存后按“无缓存”语义再取一次即可（下一请求会重新签发）。
-    await cacheSet("api", "token", null, 1);
-    throw new Error("DeviantArt 会话已过期，请再试一次");
+    clearOAuthAccessToken(env);
+    if (!retried) return officialApiGet(env, path, true);
+    throw new AuthError("DeviantArt 拒绝了访问凭据");
   }
-  if (response.status === 404) throw new Error("作品不存在、已删除或链接无效");
-  if (response.status === 403) throw new Error("作品需要登录、无权访问，或 DeviantArt 拒绝了请求");
-  if (response.status === 429) throw new Error("DeviantArt 暂时限流，请稍后重试");
+  if (response.status === 404) throw new NotFoundError("作品不存在、已删除或链接无效");
+  if (response.status === 403) throw new PermissionDeniedError();
+  if (response.status === 429) throw new RateLimitError();
   if (!response.ok) throw new Error(`DeviantArt 请求失败（HTTP ${response.status}）`);
   const data = await response.json().catch(() => null);
   if (!data || typeof data !== "object") throw new Error("DeviantArt 返回了无效数据");
   return data;
-}
-
-async function getOfficialToken(env) {
-  const cached = await cacheGet("api", "token");
-  if (cached?.token) return cached.token;
-  const endpoint = new URL(DA_TOKEN_URL);
-  const store = env.credentialStore;
-
-  // refresh token 来源：
-  //   - 装配了 CredentialStore（生产 main.js）：store 是单一事实来源。store invalid/absent
-  //     时返回 null，绝不回退 .env / 旧持久化文件里的 stale token（避免反复拿作废 token 刷）。
-  //   - 未装配 store（测试 / 旧 worker 环境）：沿用 env.DA_REFRESH_TOKEN 与旧回调。
-  let refreshToken = null;
-  if (store) {
-    refreshToken = store.getRefreshToken();
-  } else if (env.DA_REFRESH_TOKEN) {
-    const rotated = await cacheGet("api", "refresh");
-    const fromFile = typeof env.loadRefreshToken === "function" ? await env.loadRefreshToken() : null;
-    refreshToken = rotated?.token || fromFile || env.DA_REFRESH_TOKEN;
-  }
-  const hadUserToken = !!refreshToken;
-
-  if (refreshToken) {
-    // 用户 OAuth：refresh token 每次刷新会轮换（旧值随即作废）。轮换后立即写回 store 持久化。
-    endpoint.search = new URLSearchParams({
-      grant_type: "refresh_token",
-      refresh_token: refreshToken,
-      client_id: env.CLIENT_ID,
-      client_secret: env.CLIENT_SECRET,
-    });
-  } else {
-    endpoint.search = new URLSearchParams({
-      grant_type: "client_credentials",
-      client_id: env.CLIENT_ID,
-      client_secret: env.CLIENT_SECRET,
-    });
-  }
-  const response = await guardedFetch(endpoint, { method: "POST", headers: DA_HEADERS, signal: AbortSignal.timeout(15_000) }, "DeviantArt 官方 API");
-  const data = await response.json().catch(() => null);
-  if (!response.ok || !data?.access_token) {
-    const reason = data?.error_description || `HTTP ${response.status}`;
-    // 失效的 refresh token：标记 store invalid、清缓存与旧持久化值，之后不再拿旧 token 重试
-    // （store.getRefreshToken() 返回 null，后续请求自动退回 client_credentials 公开访问）。
-    if (hadUserToken && isInvalidRefreshToken(reason)) {
-      await cacheSet("api", "token", null, 1);
-      await cacheSet("api", "refresh", null, 1);
-      if (store) store.invalidate(reason);
-      if (typeof env.clearRefreshToken === "function") await env.clearRefreshToken();
-      dlog("oauth", "refresh token 已失效，凭据已标记 invalid，需 /login 重新授权");
-      await env.authNotifier?.notifyInvalid?.("refresh token invalid");
-      throw new AuthRevokedError(`DeviantArt 登录已失效，需要重新授权（${reason}）`, { stage: "oauth-refresh", status: response.status });
-    }
-    throw new Error(
-      hadUserToken
-        ? `DeviantArt 登录已过期，请重新登录（${reason}）`
-        : "DeviantArt 官方 API 凭据无效或已被拒绝，请检查 CLIENT_ID/CLIENT_SECRET",
-    );
-  }
-  const ttl = Math.max(120, Number(data.expires_in ?? 3600) - 60);
-  await cacheSet("api", "token", { token: data.access_token }, ttl);
-  // refresh token 轮换：立即写回 CredentialStore（原子落盘）+ 缓存；旧值作废。
-  if (data.refresh_token) {
-    if (store) store.save(data.refresh_token);
-    await cacheSet("api", "refresh", { token: data.refresh_token }, 30 * 24 * 3600);
-    if (typeof env.saveRefreshToken === "function") await env.saveRefreshToken(data.refresh_token);
-    await env.authNotifier?.notifyRecovered?.();
-  }
-  return data.access_token;
 }
 
 // 媒体选择：默认用 content/preview（无需原图下载额度）；仅 PREFER_ORIGINAL=1 时才走原图下载端点。
@@ -897,12 +817,10 @@ async function pickOfficialMediaUrl(env, deviation, uuid, wantOriginal = false) 
 async function sendOne(kind, mediaUrl, caption, message, env, upload = false, onStatus = null, fallbackUrl = null, cap = null) {
   const fields = MEDIA_FIELDS[kind];
   if (!fields) throw new Error("不支持的媒体类型");
-  const rendered = cap
-    ? renderArtworkCaption({ title: cap.title, author: cap.author, mediaCount: cap.mediaCount }, cap.status || {})
-    : { text: String(caption) };
+  const rendered = renderArtworkCaption(cap, cap.status || {});
   const text = rendered.text.slice(0, 1024);
   const entities = cap ? [sourceLinkEntity(text, cap.sourceUrl)].filter(Boolean) : [];
-  const sourceUrl = cap?.sourceUrl || extractPageUrl(caption);
+  const sourceUrl = cap.sourceUrl;
   const markup = buildOpenMarkup(sourceUrl);
   if (upload) {
     // 轮询模式：Telegram 服务器拉不动 wixmp（需 Referer/UA），由 Bot 先下载再上传。
@@ -922,6 +840,9 @@ async function sendOne(kind, mediaUrl, caption, message, env, upload = false, on
     // 照片 URL 超过 10 MiB：改以文档方式让 Telegram 下载（文档上限 50 MiB）。
     if (kind === "photo" && isTooBigError(error)) {
       const [docMethod, docField] = MEDIA_FIELDS.document;
+      cap.status = { ...cap.status, docFallback: true };
+      baseBody.caption = renderArtworkCaption(cap, cap.status).text;
+      baseBody.caption_entities = [sourceLinkEntity(baseBody.caption, cap.sourceUrl)].filter(Boolean);
       return telegram(env, docMethod, { [docField]: mediaUrl, ...baseBody });
     }
     throw error;
@@ -931,8 +852,9 @@ async function sendOne(kind, mediaUrl, caption, message, env, upload = false, on
 // 以 Telegram 相册（sendMediaGroup）发送一组媒体：upload 模式（轮询）自行下载后
 // multipart 附加（attach://），否则直接把 URL 交给 Telegram。caption 只放第一张。
 async function sendAlbum(items, caption, message, env, upload, onStatus = null, cap = null) {
+  if (items.length === 1) return [await sendOne(items[0].kind, items[0].url, caption, message, env, upload, onStatus, items[0].display, cap)];
   const typeOf = { photo: "photo", video: "video", animation: "animation" };
-  // cap：统一渲染器产物 { title, author, mediaCount, sourceUrl, status }；为空时回退旧 caption 字符串（兼容测试）。
+  // 所有发送路径共用结构化 caption。
   const renderCapNow = () => {
     const { text } = renderArtworkCaption(
       { title: cap.title, author: cap.author, mediaCount: cap.mediaCount },
@@ -940,9 +862,8 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null, 
     );
     return text;
   };
-  const baseText = cap ? renderCapNow() : String(caption).slice(0, 1024);
+  const baseText = renderCapNow();
   const capEntities = cap ? [sourceLinkEntity(baseText, cap.sourceUrl)].filter(Boolean) : [];
-  const openMarkup = cap ? null : openButtonMarkup(extractPageUrl(caption));
   if (!upload) {
     const result = await telegram(env, "sendMediaGroup", {
       chat_id: message.chat.id,
@@ -952,7 +873,6 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null, 
         ...(index === 0 ? { caption: baseText, ...(capEntities.length ? { caption_entities: capEntities } : {}) } : {}),
       })),
       reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
-      ...(openMarkup || {}),
       ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
     });
     return Array.isArray(result) ? result : [result];
@@ -1027,26 +947,15 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null, 
     }
     entries.push({ bytes, extension, kind: items[i].kind });
   }
-  // 下载阶段收集到的状态，回灌统一渲染器（cap 模式）；旧 caption 模式保留原拼接。
+  // 下载阶段收集状态，再用统一渲染器生成 caption。
   const status = {};
   if (compressedAny) status.compressed = true;
   if (usedBlurredAny) status.blurredPreview = true;
   else if (usedFallbackAny) status.previewOnly = true;
   if (docFalls.length) status.docFallback = true;
-  let fullCaption = baseText;
-  let fullEntities = capEntities;
-  if (cap) {
-    cap.status = { ...(cap.status || {}), ...status };
-    fullCaption = renderCapNow();
-    fullEntities = [sourceLinkEntity(fullCaption, cap.sourceUrl)].filter(Boolean);
-  } else {
-    const notes = [];
-    if (compressedAny) notes.push("部分原图超过 10MB，已压缩发送");
-    if (usedBlurredAny) notes.push("账号未登录成熟内容，仅打码预览");
-    else if (usedFallbackAny) notes.push("部分原图额度受限，已用最高清展示图替代");
-    if (notes.length) fullCaption = `${baseText}（${notes.join("；")}）`.slice(0, 1024);
-  }
-  fullCaption = fullCaption.slice(0, 1024);
+  cap.status = { ...(cap.status || {}), ...status };
+  const fullCaption = renderCapNow();
+  const fullEntities = [sourceLinkEntity(fullCaption, cap.sourceUrl)].filter(Boolean);
   const results = [];
   const mediaForm = () => {
     const form = new FormData();
@@ -1083,7 +992,7 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null, 
       f.set("caption", fullCaption);
       if (fullEntities.length) f.set("caption_entities", JSON.stringify(fullEntities));
       // 单张（entries 只剩 1，其余降级文档）支持 inline 按钮：补上来源按钮。
-      const markup = buildOpenMarkup(cap?.sourceUrl || extractPageUrl(caption || ""));
+      const markup = buildOpenMarkup(cap.sourceUrl);
       if (markup) f.set("reply_markup", JSON.stringify(markup));
       f.set(field, new Blob([bytes], { type: MIME_BY_EXTENSION[extension] || "application/octet-stream" }), `${field}.${extension}`);
       return f;
@@ -1095,7 +1004,7 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null, 
       const f = mediaForm();
       f.set("caption", fullCaption);
       if (fullEntities.length) f.set("caption_entities", JSON.stringify(fullEntities));
-      const markup = buildOpenMarkup(cap?.sourceUrl || extractPageUrl(caption || ""));
+      const markup = buildOpenMarkup(cap.sourceUrl);
       if (markup) f.set("reply_markup", JSON.stringify(markup));
       f.set("document", new Blob([doc.bytes], { type: "application/octet-stream" }), `original.${doc.extension}`);
       return f;
@@ -1105,7 +1014,7 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null, 
 }
 
 // 相册整组缓存：同一作品再次发送时直接用 file_id 组（零下载、零重传）。
-async function rememberAlbumFileIds(id, title, results, env) {
+async function rememberAlbumFileIds(id, title, results, env, cap) {
   if (!Array.isArray(results) || results.length === 0) return;
   const files = [];
   for (const result of results) {
@@ -1115,18 +1024,15 @@ async function rememberAlbumFileIds(id, title, results, env) {
   // 相册只支持 photo/video；若混入了降级发送的 document（压缩失败），整组不缓存，
   // 避免用文档 file_id 按相册回放出错。
   if (files.length === results.length && files.every((f) => f.kind === "photo" || f.kind === "video")) {
-    await cacheSet("fid", `d2:${id}`, { kind: "album", title, files }, 30 * 24 * 3600);
+    await cacheSet("fid", `d2:${id}`, { kind: "album", title, files, cap }, 30 * 24 * 3600);
   }
 }
 
 async function sendAlbumByFileIds(files, caption, message, env, cap = null) {
   const typeOf = { photo: "photo", video: "video", animation: "animation" };
-  const rendered = cap
-    ? renderArtworkCaption({ title: cap.title, author: cap.author, mediaCount: cap.mediaCount }, cap.status || {})
-    : { text: String(caption) };
+  const rendered = renderArtworkCaption(cap, cap.status || {});
   const firstCaption = rendered.text.slice(0, 1024);
   const entities = cap ? [sourceLinkEntity(firstCaption, cap.sourceUrl)].filter(Boolean) : [];
-  const openMarkup = cap ? null : openButtonMarkup(extractPageUrl(caption));
   await telegram(env, "sendMediaGroup", {
     chat_id: message.chat.id,
     media: files.map((file, index) => ({
@@ -1138,7 +1044,6 @@ async function sendAlbumByFileIds(files, caption, message, env, cap = null) {
       } : {}),
     })),
     reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
-    ...(openMarkup || {}),
     ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
   });
 }
@@ -1147,12 +1052,10 @@ async function sendAlbumByFileIds(files, caption, message, env, cap = null) {
 async function sendFileById(kind, fileId, caption, message, env, cap = null) {
   const fields = MEDIA_FIELDS[kind];
   if (!fields) throw new Error("不支持的媒体类型");
-  const rendered = cap
-    ? renderArtworkCaption({ title: cap.title, author: cap.author, mediaCount: cap.mediaCount }, cap.status || {})
-    : { text: String(caption) };
+  const rendered = renderArtworkCaption(cap, cap.status || {});
   const text = rendered.text.slice(0, 1024);
   const entities = cap ? [sourceLinkEntity(text, cap.sourceUrl)].filter(Boolean) : [];
-  const markup = buildOpenMarkup(cap?.sourceUrl || extractPageUrl(caption));
+  const markup = buildOpenMarkup(cap.sourceUrl);
   await telegram(env, fields[0], {
     chat_id: message.chat.id,
     [fields[1]]: fileId,
@@ -1166,10 +1069,10 @@ async function sendFileById(kind, fileId, caption, message, env, cap = null) {
 
 // 记住作品 → file_id 的映射，供后续复用（file_id 同 Bot 长期有效）。
 // 记录实际送达类型（照片过大被 Telegram 转成文档时也是 document）。
-async function rememberFileId(id, kindHint, title, sent, env) {
+async function rememberFileId(id, kindHint, title, sent, env, cap) {
   const detected = detectFile(sent) || { kind: kindHint, file_id: null };
   if (!detected.file_id) return;
-  await cacheSet("fid", `d2:${id}`, { file_id: detected.file_id, kind: detected.kind, title }, 30 * 24 * 3600);
+  await cacheSet("fid", `d2:${id}`, { file_id: detected.file_id, kind: detected.kind, title, cap }, 30 * 24 * 3600);
 }
 
 // 从 sendXxx 返回的 Message 里探测实际送达类型与 file_id。
@@ -1232,7 +1135,7 @@ async function uploadMedia(env, kind, mediaUrl, caption, message, onStatus = nul
   let bytes = concatBytes(chunks);
   let extension = guessExtension(mediaUrl, kind);
   let sendAs = kind;
-  // 统一渲染器模式（cap）：收集状态后一次渲染；旧 caption 字符串模式保留原拼接。
+  // 收集状态后一次渲染。
   const capStatus = { ...(cap?.status || {}) };
   let captionText = caption;
   let captionEntities = [];
@@ -1244,7 +1147,6 @@ async function uploadMedia(env, kind, mediaUrl, caption, message, onStatus = nul
       bytes = compressed;
       extension = "jpg";
       capStatus.compressed = true;
-      if (!cap) captionText = `${caption}（原图超过 10MB，已压缩发送）`;
     } else {
       sendAs = "document";
       capStatus.docFallback = true;
@@ -1253,19 +1155,13 @@ async function uploadMedia(env, kind, mediaUrl, caption, message, onStatus = nul
   if (usedFallback) {
     extension = "jpg";
     const blurred = /blur_/.test(fallbackUrl || "");
-    if (cap) {
-      if (blurred) capStatus.blurredPreview = true;
-      else capStatus.previewOnly = true;
-    } else {
-      captionText = `${captionText}（${blurred ? "账号未登录成熟内容或额度受限，仅能发送打码预览" : "原图额度受限，已用最高清展示图替代"}）`;
-    }
+    if (blurred) capStatus.blurredPreview = true;
+    else capStatus.previewOnly = true;
   }
-  if (cap) {
-    const { text } = renderArtworkCaption({ title: cap.title, author: cap.author, mediaCount: cap.mediaCount }, capStatus);
-    captionText = text;
-    captionEntities = [sourceLinkEntity(text, cap.sourceUrl)].filter(Boolean);
-  }
-  const openMarkup = buildOpenMarkup(cap?.sourceUrl || extractPageUrl(caption));
+  cap.status = capStatus;
+  captionText = renderArtworkCaption(cap, capStatus).text;
+  captionEntities = [sourceLinkEntity(captionText, cap.sourceUrl)].filter(Boolean);
+  const openMarkup = buildOpenMarkup(cap.sourceUrl);
   const makeForm = (field) => {
     const form = new FormData();
     form.set("chat_id", String(message.chat.id));
@@ -1284,6 +1180,11 @@ async function uploadMedia(env, kind, mediaUrl, caption, message, onStatus = nul
   } catch (error) {
     // 照片（含压缩后）仍被拒时再按文档试一次
     if (kind === "photo" && isTooBigError(error)) {
+      if (cap) {
+        cap.status = { ...cap.status, docFallback: true };
+        captionText = renderArtworkCaption(cap, cap.status).text;
+        captionEntities = [sourceLinkEntity(captionText, cap.sourceUrl)].filter(Boolean);
+      }
       return telegramForm(env, MEDIA_FIELDS.document[0], () => makeForm("document"));
     }
     throw error;
@@ -1469,9 +1370,9 @@ async function fetchDeviantArt(url, init) {
 async function throwForDeviantArtStatus(response) {
   if (response.ok) return;
   response.body?.cancel();
-  if (response.status === 404) throw new Error("作品不存在、已删除或链接无效");
-  if ([401, 403].includes(response.status)) throw new Error("作品需要登录、无权访问，或 DeviantArt 拒绝了请求");
-  if (response.status === 429) throw new Error("DeviantArt 暂时限流，请稍后重试");
+  if (response.status === 404) throw new NotFoundError("作品不存在、已删除或链接无效");
+  if ([401, 403].includes(response.status)) throw new PermissionDeniedError();
+  if (response.status === 429) throw new RateLimitError();
   if (response.status >= 500) throw new Error("DeviantArt 服务暂时不可用，请稍后重试");
   throw new Error(`DeviantArt 请求失败（HTTP ${response.status}）`);
 }
@@ -1721,7 +1622,7 @@ async function proxyMedia(request, env) {
   }
 
   const range = request.headers.get("Range");
-  const response = await fetch(url, {
+  const response = await fetchPublicMedia(url, {
     method: request.method,
     headers: { Referer: DEVIANTART, ...DA_HEADERS, ...(range ? { Range: range } : {}) },
     redirect: "follow",
@@ -1813,7 +1714,4 @@ function isHost(host, domain) {
 
 // 供 main.js 装配 AuthNotifier / OAuth 登录流程使用。
 export { telegram as sendTelegram };
-// Web OAuth 登录成功后调用：清掉短期 access token，下次成熟内容请求用新 refresh token 重新签发。
-export async function clearOAuthAccessToken() {
-  await cacheSet("api", "token", null, 1);
-}
+export { clearOAuthAccessToken } from "./auth/token.js";
