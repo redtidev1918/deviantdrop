@@ -741,3 +741,43 @@ test('poll compresses a real oversized image before upload', async (t) => {
     text: 'https://www.deviantart.com/artist/art/large-999888' } }, { BOT_TOKEN: '111:secret', WEBHOOK_SECRET: 'secret' });
   assert.equal(uploaded, true);
 });
+
+test("splits media beyond 10 into multiple albums", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const sends = [];
+  globalThis.fetch = async (input, init = {}) => {
+    const url = String(input);
+    if (url === "https://www.deviantart.com/") return new Response("window.__CSRF_TOKEN__ = 'csrf'");
+    if (url.includes("/_puppy/dadeviation/init")) {
+      const pages = Array.from({ length: 10 }, (_, i) => ({
+        media: { baseUri: `https://images.wixmp.com/p${i + 1}.jpg`, token: `t${i + 1}` },
+      }));
+      return Response.json({
+        deviation: {
+          title: "多页",
+          isMultiMedia: true,
+          media: { baseUri: "https://images.wixmp.com/main.jpg", token: "t0" },
+          extended: { additionalMedia: pages },
+        },
+      });
+    }
+    if (url.includes("api.telegram.org")) {
+      sends.push({ url, body: JSON.parse(init.body) });
+      return Response.json({ ok: true, result: [{ message_id: 1 }] });
+    }
+    throw new Error(`unexpected fetch: ${url}`);
+  };
+  t.after(installFakeCache());
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  const env = { BOT_TOKEN: "111:secret", WEBHOOK_SECRET: "secret" };
+  await postMessage(env, 801, {
+    from: { id: 42 }, chat: { id: 920, type: "private" }, message_id: 80,
+    text: "https://www.deviantart.com/artist/art/multi-999999999",
+  });
+
+  const groups = sends.filter((s) => s.url.endsWith("sendMediaGroup"));
+  assert.equal(groups.length, 2); // 10 + 1 两张相册
+  assert.equal(groups[0].body.media.length, 10);
+  assert.equal(groups[1].body.media.length, 1);
+});

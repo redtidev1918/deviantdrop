@@ -329,9 +329,15 @@ async function sendDeviantArt(url, message, env, origin, sessionMemo = {}, onSta
     const items = [{ kind: media.kind, url: media.url, display: media.display }, ...(media.extras || [])];
     // 多文件作品：主图 + 附加图合并成一条 Telegram 相册（≤10、仅 photo/video 时）；
     // 否则退回单图发送（此时记得 file_id 供后续去重）
-    if (items.length > 1 && items.length <= 10 && items.every((it) => it.kind === "photo" || it.kind === "video")) {
-      const albumResults = await sendAlbum(items, `${media.title}\n${url.href}`, message, env, !origin, onStatus);
-      await rememberAlbumFileIds(target.id, media.title, albumResults, env);
+    if (items.length > 1 && items.every((it) => it.kind === "photo" || it.kind === "video")) {
+      // 超过 10 张切成多条相册（每条约 10 张），避免退化成逐条单发
+      const chunks = [];
+      for (let i = 0; i < items.length; i += 10) chunks.push(items.slice(i, i + 10));
+      for (let ci = 0; ci < chunks.length; ci += 1) {
+        const caption = ci === 0 ? `${media.title}\n${url.href}` : "";
+        const albumResults = await sendAlbum(chunks[ci], caption, message, env, !origin, onStatus);
+        if (chunks.length === 1) await rememberAlbumFileIds(target.id, media.title, albumResults, env);
+      }
     } else {
       const sent = await sendOne(media.kind, media.url, `${media.title}\n${url.href}`, message, env, !origin, onStatus, media.display);
       if (items.length === 1) await rememberFileId(target.id, media.kind, media.title, sent, env);
