@@ -20,7 +20,25 @@ docker compose up -d --build
 
 - 识别消息与 caption 里的作品链接（`https` / `www` / 旧式域名 / fav.me 等），最多同时处理 5 个。
 - **网页接口优先**（视频 / GIF / 新作品都能取到），**官方 OAuth API 兜底**。
+- 图片 / 多图相册（sendMediaGroup，超过 10 张自动分批）/ GIF / 视频 / 超大图压缩与 document 兜底；Telegram 拉不动 CDN 时自动下载后 multipart 上传。
 - `/start` `/help` `/about` 命令；每聊天限流、去重、429/500/503 退避重试。
+
+### 登录与管理员命令
+
+- **`/login`（管理员）**：在 Telegram 里一键完成 DeviantArt Web OAuth 授权。点按钮在浏览器授权后，refresh token 立即在服务器生效，**无需 SSH / 改 .env / 重启**。需要配置 `PUBLIC_BASE_URL`，并把 `<PUBLIC_BASE_URL>/auth/deviantart/callback` 加入 DA 应用的 redirect 白名单。
+- **`/status`（管理员）**：查看 Telegram / OAuth / Cookie / TelePress / Cache 状态（不显示任何密钥）。
+- `DA_REFRESH_TOKEN` / `DA_COOKIES` 只作为**首次迁移 seed**：启动时写入 `/data/auth/deviantart.json` 与 `/data/auth/deviantart-cookies.json`，之后以这些文件为准（refresh token 轮换即落盘、失效自动标记；Cookie 支持热更新），不再回退读 .env 里的旧值。
+- 登录失效时管理员收到带「重新登录」按钮的通知（6 小时冷却，恢复后另发一次恢复通知）。
+
+### 回复排版
+
+- 统一排版：`🎨 标题 / 👤 作者 / 🖼 N 张图片 / ⚠️ 状态说明 / 🔗 来源：DeviantArt`。
+- caption 里**不再放裸 URL**：来源链接通过 `caption_entities` 的 `text_link` 精确挂在「DeviantArt」上，中文括号/说明文字不会再破坏链接。
+- 单条媒体带「在 DeviantArt 打开」内联按钮；相册（sendMediaGroup 不支持按钮）首图用 text_link，不再额外为发链接而补发消息。
+
+### TelePress（可选）
+
+超大图集（>10 张）或 Telegram 发送失败时，可借助 [TelePress](https://github.com/redtidev1918/telepress) 生成 Telegraph 页面。默认关闭（`TELEPRESS_MODE=off`），失败绝不影响原生 Telegram 发送。同机部署建议 `TELEPRESS_URL=http://127.0.0.1:<port>` 并在两端配置同一个 `TELEPRESS_API_KEY`。
 
 完整的解析机制、双通道细节、限流策略、部署与排错，请看 **📖 文档站点**：
 
