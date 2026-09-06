@@ -1,6 +1,7 @@
 const TELEGRAM_API = "https://api.telegram.org";
 const DEVIANTART = "https://www.deviantart.com/";
 import { renderArtworkCaption, sourceLinkEntity, openButtonMarkup as buildOpenMarkup, sourceLineText, buildCapFromMedia } from "./rendering/caption.js";
+import { AuthRevokedError, publicError } from "./auth/errors.js";
 // 浏览器 UA：DeviantArt 的 WAF 会拦明显的爬虫 UA（尤其是数据中心出口 IP）。
 const USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 const MAX_LINKS = 5;
@@ -326,9 +327,16 @@ function cacheUrl(namespace, key) {
 
 // DA 匿名 session（CSRF + cookie）与聊天无关，跨消息、跨聊天复用可显著减少
 // 对 DeviantArt 的请求总量，降低触发自适应限流的概率。配置 DA_COOKIES 时
+// 当前生效的 DA cookie：优先热更新 CookieStore，回退 env.DA_COOKIES（兼容旧配置）。
+function currentDaCookies(env) {
+  if (env.cookieStore) return env.cookieStore.getCookies();
+  return env.DA_COOKIES || null;
+}
+
 // 注入登录会话（用于成熟内容），并单独缓存避免与匿名 csrf 串用。
 async function getDeviantArtSession(env) {
-  const key = env.DA_COOKIES ? "session:auth" : "session";
+  const cookies = currentDaCookies(env);
+  const key = cookies ? "session:auth" : "session";
   const cached = await cacheGet("da", key);
   if (cached?.csrf) return cached;
   const session = await createDeviantArtSession(env);
@@ -351,13 +359,14 @@ async function takeLinkBudget(chatId, count) {
 
 async function createDeviantArtSession(env) {
   const headers = { Accept: "text/html", ...DA_HEADERS };
-  if (env.DA_COOKIES) headers.Cookie = env.DA_COOKIES;
+  const cookies = currentDaCookies(env);
+  if (cookies) headers.Cookie = cookies;
   const home = await fetchDeviantArt(DEVIANTART, { headers });
   await throwForDeviantArtStatus(home);
   const html = await home.text();
   const csrf = html.match(/window\.__CSRF_TOKEN__ = '([^']+)'/)?.[1];
   if (!csrf) throw new Error("DeviantArt 页面结构可能已变化，无法读取 CSRF token");
-  return { csrf, cookies: env.DA_COOKIES || getCookies(home.headers) };
+  return { csrf, cookies: currentDaCookies(env) || getCookies(home.headers) };
 }
 
 // 解析并发送单个作品。双通道级联：
@@ -483,14 +492,15 @@ async function resolveWebMedia(url, env, origin, sessionMemo) {
         ...(session.cookies ? { Cookie: session.cookies } : {}),
       });
       const deviation = data.deviation;
-      // 有用户 OAuth（refresh token）或登录 Cookie 都视为已登录，放行成熟内容
-      const allowMature = Boolean(env.DA_COOKIES || env.DA_REFRESH_TOKEN);
+      // 有用户 OAuth（CredentialStore 里的 refresh token）或登录 Cookie 都视为已登录，放行成熟内容
+      const hasOAuth = !!(env.credentialStore ? env.credentialStore.getRefreshToken() : env.DA_REFRESH_TOKEN);
+      const allowMature = Boolean(currentDaCookies(env) || hasOAuth);
       const item = extractDeviantArtMedia(deviation, allowMature);
       dlog("media", `dev=${target.id} mature=${deviation?.isMature === true} allowMature=${allowMature} webKind=${item.kind} webUrl=${shortUrl(item.url)} blur=${/blur_/.test(item.url || "")}`);
       // 成熟作品：用用户 OAuth 走官方接口取“未打码原图”，替代打码的网页预览
       let matureBlurred = false;
       let matureOverrideOk = false;
-      if (deviation?.isMature === true && env.DA_REFRESH_TOKEN) {
+      if (deviation?.isMature === true && hasOAuth) {
         const uuid = deviation?.extended?.deviationUuid;
         try {
           if (uuid) {
@@ -571,7 +581,7 @@ async function resolveWebMedia(url, env, origin, sessionMemo) {
       const text = error instanceof Error ? error.message : String(error);
       if (attempt === 0 && /HTTP 400/.test(text)) {
         // csrf 过期/被抢占：清掉缓存会话，下一次循环用新会话重试
-        const key = env.DA_COOKIES ? "session:auth" : "session";
+        const key = currentDaCookies(env) ? "session:auth" : "session";
         await cacheSet("da", key, null, 1);
         sessionMemo.session = null;
         console.error("init 400，刷新会话重试:", text);
@@ -732,13 +742,18 @@ async function getOfficialToken(env) {
   const cached = await cacheGet("api", "token");
   if (cached?.token) return cached.token;
   const endpoint = new URL(DA_TOKEN_URL);
-  if (env.DA_REFRESH_TOKEN) {
-    // 用户 OAuth：refresh token 每次刷新会轮换（旧值随即作废）。优先用「最近一次轮换后的值」：
-    // 缓存（内存/磁盘 cache.json）> 持久化文件（独立于 cache，避免清缓存后回到已作废的旧 token）> .env 初始值。
-    // 参考 deviantart-downloader oauth.py 的 OAuthTokenStore：轮换后把新 token 写回持久化存储。
+  // refresh token 来源：优先统一 CredentialStore（单一事实来源）；回退旧 env 回调（测试/兼容）。
+  const store = env.credentialStore;
+  const storedRefresh = store ? store.getRefreshToken() : null;
+  const hasUserToken = !!(storedRefresh || env.DA_REFRESH_TOKEN);
+  const legacyRefresh = async () => {
     const rotated = await cacheGet("api", "refresh");
     const fromFile = typeof env.loadRefreshToken === "function" ? await env.loadRefreshToken() : null;
-    const refreshToken = rotated?.token || fromFile || env.DA_REFRESH_TOKEN;
+    return rotated?.token || fromFile || env.DA_REFRESH_TOKEN || null;
+  };
+  const refreshToken = storedRefresh || await legacyRefresh();
+  if (hasUserToken && refreshToken) {
+    // 用户 OAuth：refresh token 每次刷新会轮换（旧值随即作废）。轮换后立即写回 store 持久化。
     endpoint.search = new URLSearchParams({
       grant_type: "refresh_token",
       refresh_token: refreshToken,
@@ -756,24 +771,30 @@ async function getOfficialToken(env) {
   const data = await response.json().catch(() => null);
   if (!response.ok || !data?.access_token) {
     const reason = data?.error_description || `HTTP ${response.status}`;
-    // 失效的 refresh token 不再可刷新：清掉缓存与持久化文件里的旧值，避免每次都拿已作废的 token 重试。
-    if (env.DA_REFRESH_TOKEN && isInvalidRefreshToken(reason)) {
+    // 失效的 refresh token：标记 CredentialStore invalid、清缓存与旧持久化值，之后不再拿旧 token 重试。
+    if (hasUserToken && isInvalidRefreshToken(reason)) {
+      await cacheSet("api", "token", null, 1);
       await cacheSet("api", "refresh", null, 1);
+      if (store) store.invalidate(reason);
       if (typeof env.clearRefreshToken === "function") await env.clearRefreshToken();
-      dlog("oauth", `refresh token 已失效（${reason}），已清空本地持久化凭据，需重新登录`);
+      dlog("oauth", `refresh token 已失效（${isInvalidRefreshToken(reason) ? "invalid" : reason}），凭据已标记 invalid，需 /login 重新授权`);
+      await env.authNotifier?.notifyInvalid?.("refresh token invalid");
+      throw new AuthRevokedError(`DeviantArt 登录已失效，需要重新授权（${reason}）`, { stage: "oauth-refresh", status: response.status });
     }
     throw new Error(
-      env.DA_REFRESH_TOKEN
+      hasUserToken
         ? `DeviantArt 登录已过期，请重新登录（${reason}）`
         : "DeviantArt 官方 API 凭据无效或已被拒绝，请检查 CLIENT_ID/CLIENT_SECRET",
     );
   }
   const ttl = Math.max(120, Number(data.expires_in ?? 3600) - 60);
   await cacheSet("api", "token", { token: data.access_token }, ttl);
-  // refresh token 若被轮换：同时写缓存与独立持久化文件（缓存清空后仍能续期，不会回到已作废的旧 token）。
+  // refresh token 轮换：立即写回 CredentialStore（原子落盘）+ 缓存；旧值作废。
   if (data.refresh_token) {
+    if (store) store.save(data.refresh_token);
     await cacheSet("api", "refresh", { token: data.refresh_token }, 30 * 24 * 3600);
     if (typeof env.saveRefreshToken === "function") await env.saveRefreshToken(data.refresh_token);
+    await env.authNotifier?.notifyRecovered?.();
   }
   return data.access_token;
 }
@@ -1713,14 +1734,4 @@ function isMediaHost(host) {
 function isHost(host, domain) {
   const value = host.toLowerCase();
   return value === domain || value.endsWith(`.${domain}`);
-}
-
-function publicError(error) {
-  const message = error instanceof Error ? error.message : "未知错误";
-  if (/file is too big/i.test(message)) return "媒体超过 Telegram Bot 的文件大小限制";
-  if (/failed to get http url content|wrong type of the web page content/i.test(message)) {
-    return "Telegram 无法读取该媒体，作品可能受限或媒体格式不受支持";
-  }
-  if (/timeout|timed out|abort/i.test(message)) return "请求超时，请稍后重试";
-  return message.slice(0, 300);
 }
