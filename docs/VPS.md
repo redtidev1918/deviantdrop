@@ -128,6 +128,24 @@ Cookie 会过期且无法自动续期；用 OAuth 登录一次，Bot 之后自�
 
 > 原图下载仍受 DeviantArt 免费账号每日额度限制；OAuth 解决的是“登录态/打码”，不是额度。
 
+## 4.7 推送即部署（可选）
+
+在 GitHub 仓库 Settings → Secrets and variables → Actions 里添加三个 secret：
+
+- `VPS_HOST` = `114.55.249.249`
+- `VPS_USER` = `root`
+- `VPS_SSH_KEY` = 部署用私钥内容（推荐单独生成一把）
+
+生成专用部署密钥（在能访问 VPS 的机器上）：
+
+```bash
+ssh-keygen -t ed25519 -f ~/.ssh/deviantdrop_deploy -N ""
+ssh-copy-id -i ~/.ssh/deviantdrop_deploy.pub root@114.55.249.249
+cat ~/.ssh/deviantdrop_deploy        # 内容贴进 VPS_SSH_KEY
+```
+
+之后 main 上的 `src/`、`scripts/`、`package*.json`、`Dockerfile`、`docker-compose.yml` 任一变化，GitHub Actions 会自动 `git pull + docker compose up -d --build`，无需手动部署。
+
 ## 5. 验证与排错
 
 ```bash
