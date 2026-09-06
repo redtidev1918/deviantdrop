@@ -456,9 +456,11 @@ async function createDeviantArtSession(env) {
 //   2) 网页不可达时，若配置了官方 API 凭据则走「官方 API + archive.org 存档映射」兜底。
 async function sendDeviantArt(url, message, env, origin, sessionMemo = {}, onStatus = null) {
   const target = parseDeviantArtTarget(url);
-  // 媒体级去重：同一作品首次发过后缓存 Telegram file_id，再发直接用 file_id（零下载）。
+  // 媒体级去重：同一作品首次发过后缓存 Telegram file_id，再发直接用 file_id（零下载、零重传）。
+  // 严格校验缓存条目：历史版本/失败发送可能留下没有任何 file_id 的坏条目，命中必须视为未缓存，
+  // 否则会永远跳过缓存而每次重新下载。
   const cached = await cacheGet("fid", `d2:${target.id}`);
-  if (cached?.kind === "album" && Array.isArray(cached.files) && cached.files.length) {
+  if (cached?.kind === "album" && Array.isArray(cached.files) && cached.files.length && cached.files.every((f) => f?.file_id)) {
     dlog("send", `replay album id=${target.id} files=${cached.files.length}`);
     // 重放也用统一渲染：caption 无裸 URL，来源用 text_link；相册另补发入口消息。
     const { capTitle, capAuthor } = splitTitleAuthor(cached.title);
@@ -466,7 +468,7 @@ async function sendDeviantArt(url, message, env, origin, sessionMemo = {}, onSta
     await sendAlbumByFileIds(cached.files, "", message, env, replayCap);
     return;
   }
-  if (cached?.file_id) {
+  if (cached?.file_id && cached.kind) {
     dlog("send", `replay file id=${target.id} kind=${cached.kind}`);
     const { capTitle, capAuthor } = splitTitleAuthor(cached.title);
     const replayCap = cached.cap ? { ...cached.cap, sourceUrl: url.href } : capObject({ title: capTitle, author: capAuthor, sourceUrl: url.href });
@@ -1050,7 +1052,9 @@ async function sendAlbum(items, caption, message, env, upload, onStatus = null, 
   return results;
 }
 
-// 相册整组缓存：同一作品再次发送时直接用 file_id 组（零下载、零重传）。
+// 相册整组缓存：同一作品再次发送时直接用 file_id（零下载、零重传）。
+// results 可能混合「相册消息（含 photo/video 数组）」与「单独发送的 document/animation」，
+// 逐条探测 file_id；document 重放时走 sendDocument（不能进 sendMediaGroup）。
 async function rememberAlbumFileIds(id, title, results, env, cap) {
   if (!Array.isArray(results) || results.length === 0) return;
   const files = [];
@@ -1058,31 +1062,44 @@ async function rememberAlbumFileIds(id, title, results, env, cap) {
     const detected = detectFile(result);
     if (detected?.file_id) files.push(detected);
   }
-  // 相册只支持 photo/video；若混入了降级发送的 document（压缩失败），整组不缓存，
-  // 避免用文档 file_id 按相册回放出错。
-  if (files.length === results.length && files.every((f) => f.kind === "photo" || f.kind === "video")) {
+  // 至少要有一个可用 file_id 才缓存；photo/video 可进相册重放，document/animation 单独重放。
+  if (files.length) {
     await cacheSet("fid", `d2:${id}`, { kind: "album", title, files, cap }, 30 * 24 * 3600);
   }
 }
 
 async function sendAlbumByFileIds(files, caption, message, env, cap = null) {
-  const typeOf = { photo: "photo", video: "video", animation: "animation" };
+  const albumable = files.filter((f) => f.kind === "photo" || f.kind === "video");
+  const standalone = files.filter((f) => !(f.kind === "photo" || f.kind === "video"));
+  const typeOf = { photo: "photo", video: "video" };
   const rendered = renderArtworkCaption(cap, cap.status || {});
   const firstCaption = rendered.text.slice(0, 1024);
   const entities = cap ? [sourceLinkEntity(firstCaption, cap.sourceUrl)].filter(Boolean) : [];
-  await telegram(env, "sendMediaGroup", {
-    chat_id: message.chat.id,
-    media: files.map((file, index) => ({
-      type: typeOf[file.kind] || "photo",
-      media: file.file_id,
-      ...(index === 0 ? {
-        caption: firstCaption,
-        ...(entities.length ? { caption_entities: entities } : {}),
-      } : {}),
-    })),
-    reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
-    ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
-  });
+  if (albumable.length) {
+    // sendMediaGroup 是 JSON 请求（file_id 直传，无 multipart），实体 offset 按 UTF-16 即可。
+    await telegram(env, "sendMediaGroup", {
+      chat_id: message.chat.id,
+      media: albumable.map((file, index) => ({
+        type: typeOf[file.kind] || "photo",
+        media: file.file_id,
+        ...(index === 0 ? {
+          caption: firstCaption,
+          ...(entities.length ? { caption_entities: entities } : {}),
+        } : {}),
+      })),
+      reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+      ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
+    });
+  }
+  // 文档（压缩失败的超大原图）单独重发：第一条带 caption + 来源按钮。
+  for (let i = 0; i < standalone.length; i += 1) {
+    const f = standalone[i];
+    if (f.kind === "document") {
+      await sendFileById("document", f.file_id, "", message, env, i === 0 ? cap : null);
+    } else {
+      await sendFileById(f.kind, f.file_id, "", message, env, i === 0 && !albumable.length ? cap : null);
+    }
+  }
 }
 
 // 用已缓存 file_id 直接重发（不再下载，Telegram 服务端去重）。
