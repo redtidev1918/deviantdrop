@@ -45,6 +45,24 @@ function extractPageUrl(caption) {
 function openButtonMarkup(pageUrl) {
   return pageUrl ? { reply_markup: { inline_keyboard: [[{ text: "在 DeviantArt 打开", url: pageUrl }]] } } : null;
 }
+// Telegram 的 sendMediaGroup（相册）会静默丢弃 inline_keyboard：实测请求里带了
+// reply_markup，返回的消息却没有（单张 sendPhoto 才支持内联按钮）。所以相册发完后
+// 补一条只带「打开」按钮的消息，多图作品也有入口；补发失败不影响作品本身。
+async function sendAlbumOpenLink(message, pageUrl, env) {
+  if (!pageUrl) return;
+  try {
+    await telegram(env, "sendMessage", {
+      chat_id: message.chat.id,
+      text: "作品页（含其余画面 / 未打码原图）：",
+      reply_markup: { inline_keyboard: [[{ text: "在 DeviantArt 打开", url: pageUrl }]] },
+      reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
+      ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
+      disable_notification: true,
+    });
+  } catch (error) {
+    dlog("send", `相册打开按钮补发失败: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
 // PREFER_ORIGINAL=1 才优先抓原图（默认关闭：免费账号原图有日配额，常 403/429）。
 function preferOriginal(env) {
   return /^(1|true|yes)$/i.test(String(env?.PREFER_ORIGINAL || ""));
@@ -342,10 +360,11 @@ async function createDeviantArtSession(env) {
 async function sendDeviantArt(url, message, env, origin, sessionMemo = {}, onStatus = null) {
   const target = parseDeviantArtTarget(url);
   // 媒体级去重：同一作品首次发过后缓存 Telegram file_id，再发直接用 file_id（零下载）。
-  const cached = await cacheGet("fid", `d:${target.id}`);
+  const cached = await cacheGet("fid", `d2:${target.id}`);
   if (cached?.kind === "album" && Array.isArray(cached.files) && cached.files.length) {
     dlog("send", `replay album id=${target.id} files=${cached.files.length}`);
     await sendAlbumByFileIds(cached.files, `${cached.title}\n${url.href}`, message, env);
+    await sendAlbumOpenLink(message, url.href, env);
     return;
   }
   if (cached?.file_id) {
@@ -373,11 +392,13 @@ async function sendDeviantArt(url, message, env, origin, sessionMemo = {}, onSta
         const albumResults = await sendAlbum(chunks[ci], caption, message, env, !origin, onStatus);
         if (chunks.length === 1) await rememberAlbumFileIds(target.id, media.title, albumResults, env);
       }
+      // 相册不支持内联按钮（sendMediaGroup 会静默吞掉），补发一条带「打开」按钮的消息。
+      await sendAlbumOpenLink(message, url.href, env);
     } else {
       const sent = await sendOne(media.kind, media.url, `${title}\n${url.href}`, message, env, !origin, onStatus, media.display);
       if (items.length === 1) await rememberFileId(target.id, media.kind, title, sent, env);
       for (const extra of media.extras || []) {
-        await sendOne(extra.kind, extra.url, `（${media.title} 的更多画面）`, message, env, !origin, onStatus, extra.display);
+        await sendOne(extra.kind, extra.url, `（${media.title} 的更多画面）\n${url.href}`, message, env, !origin, onStatus, extra.display);
       }
     }
     return;
@@ -942,7 +963,7 @@ async function rememberAlbumFileIds(id, title, results, env) {
   // 相册只支持 photo/video；若混入了降级发送的 document（压缩失败），整组不缓存，
   // 避免用文档 file_id 按相册回放出错。
   if (files.length === results.length && files.every((f) => f.kind === "photo" || f.kind === "video")) {
-    await cacheSet("fid", `d:${id}`, { kind: "album", title, files }, 30 * 24 * 3600);
+    await cacheSet("fid", `d2:${id}`, { kind: "album", title, files }, 30 * 24 * 3600);
   }
 }
 
@@ -983,7 +1004,7 @@ async function sendFileById(kind, fileId, caption, message, env) {
 async function rememberFileId(id, kindHint, title, sent, env) {
   const detected = detectFile(sent) || { kind: kindHint, file_id: null };
   if (!detected.file_id) return;
-  await cacheSet("fid", `d:${id}`, { file_id: detected.file_id, kind: detected.kind, title }, 30 * 24 * 3600);
+  await cacheSet("fid", `d2:${id}`, { file_id: detected.file_id, kind: detected.kind, title }, 30 * 24 * 3600);
 }
 
 // 从 sendXxx 返回的 Message 里探测实际送达类型与 file_id。
