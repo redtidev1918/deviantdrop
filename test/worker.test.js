@@ -307,6 +307,11 @@ test("answers /about, parses media captions, and ignores link-less or own-forwar
     message_id: 6, from: { id: 43 }, chat: { id: -1, type: "group" }, text: "闲聊一下",
   });
   assert.equal(groupChat.replies.length, 0);
+  const otherBotCommand = await send({
+    message_id: 7, from: { id: 43 }, chat: { id: -1, type: "group" }, text: "/ban",
+    entities: [{ type: "bot_command", offset: 0, length: 4 }],
+  });
+  assert.equal(otherBotCommand.replies.length, 0);
 });
 
 // —— 加固测试：注入假的 Cloudflare Cache API（无 caches 时生产逻辑自动降级为关闭） ——

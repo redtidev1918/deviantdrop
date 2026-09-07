@@ -197,10 +197,10 @@ async function handleMessage(message, env, origin) {
     return;
   }
   if (!links.length) {
-    // 无 caption 的图片、贴纸等消息不打扰；只有明确的文字（私聊文本或 /命令）
-    // 才回一条用法提示，群聊里的闲聊保持安静。
+    // 无 caption 的图片、贴纸等消息不打扰；私聊文本才回用法提示。
+    // 群聊里的闲聊和其他 Bot 命令保持安静。
     if (!text.trim()) return;
-    if (message.chat.type === "private" || text.startsWith("/")) {
+    if (message.chat.type === "private") {
       await telegram(env, "sendMessage", {
         chat_id: message.chat.id,
         text: HINT_TEXT,
