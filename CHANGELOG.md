@@ -10,6 +10,13 @@
 
 ---
 
+## [1.6.3](https://github.com/redtidev1918/deviantdrop/compare/v1.6.2...v1.6.3) (2026-09-07)
+
+
+### Bug Fixes
+
+* **bot:** ignore unrelated group commands ([c1acd81](https://github.com/redtidev1918/deviantdrop/commit/c1acd81a2e9f7f499b7d60ba6fcb891438c52066))
+
 ## [1.6.2](https://github.com/redtidev1918/deviantdrop/compare/v1.6.1...v1.6.2) (2026-09-06)
 
 
