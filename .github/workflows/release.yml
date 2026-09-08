@@ -1,69 +1,32 @@
 name: Release
 
-# 全自动发版，无需任何 PAT/secret：main 上合入 release-worthy 提交后，release-please
-# 在本工作流内开/更发版 PR；发版 PR 合并后同一个 run 内推 tag 并创建 GitHub Release
-# （不依赖 tag push 触发新工作流，内置 GITHUB_TOKEN 即可）。
-# 仍支持手动推 v* tag / workflow_dispatch 重跑。
 on:
+  pull_request:
   push:
     branches: [main]
-    tags: ["v*"]
+  schedule:
+    - cron: "23 * * * *"
   workflow_dispatch:
     inputs:
-      tag:
-        description: 要重跑/重发布的已有 tag（如 v1.6.4）；main push 自动发版时忽略此输入
-        required: true
-        type: string
+      version: {description: "Existing version; blank reads the manifest", required: false, type: string}
+      dry_run: {description: "Build and validate without publishing", required: false, default: false, type: boolean}
+      force: {description: "Rerun a healthy version", required: false, default: false, type: boolean}
+      repair: {description: "Repair the current incomplete version", required: false, default: false, type: boolean}
+      stage: {description: "Recovery stage label", required: false, default: all, type: string}
 
 permissions:
   contents: write
   pull-requests: write
-  pages: write
+  packages: write
   id-token: write
 
 jobs:
-  release-please:
-    runs-on: ubuntu-latest
-    outputs:
-      releases_created: ${{ steps.rp.outputs.releases_created }}
-      tag_name: ${{ steps.rp.outputs.tag_name }}
-    steps:
-      - uses: actions/checkout@v7
-      - name: Release Please
-        id: rp
-        uses: googleapis/release-please-action@v4
-        with:
-          config-file: release-please-config.json
-          manifest-file: .release-please-manifest.json
-
   release:
-    needs: release-please
-    if: >-
-      github.event_name != 'push' ||
-      github.ref == 'refs/heads/main' && needs.release-please.outputs.releases_created == 'true' ||
-      startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
-    env:
-      RELEASE_TAG: ${{ needs.release-please.outputs.tag_name || inputs.tag || github.ref_name }}
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.release-please.outputs.tag_name || inputs.tag || github.ref }}
-          fetch-depth: 0
-      - uses: actions/setup-node@v7
-        with:
-          node-version: 22
-      - run: npm ci
-      - run: npm run check
-      - name: Extract changelog section
-        id: notes
-        run: |
-          VERSION="${RELEASE_TAG#v}"
-          awk "/^## \[${VERSION}\]/{flag=1; next} /^## \[/{if (flag) exit} flag" CHANGELOG.md > release_notes.md
-      - name: Create/update GitHub Release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ env.RELEASE_TAG }}
-          name: DeviantDrop ${{ env.RELEASE_TAG }}
-          body_path: release_notes.md
-          generate_release_notes: true
+    uses: redtidev1918/release-infra/.github/workflows/reusable-release.yml@v1
+    with:
+      version: ${{ inputs.version || '' }}
+      dry_run: ${{ github.event_name == 'pull_request' || inputs.dry_run || false }}
+      force: ${{ inputs.force || false }}
+      repair: ${{ github.event_name == 'pull_request' || inputs.repair || false }}
+      stage: ${{ inputs.stage || 'all' }}
+    secrets: inherit

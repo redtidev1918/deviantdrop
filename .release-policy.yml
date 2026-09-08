@@ -1,0 +1,26 @@
+{
+  "kind": "none",
+  "versioning": {
+    "mode": "release-please"
+  },
+  "build": {
+    "test": "npm ci && npm test && npx wrangler deploy --dry-run --outdir dist/wrangler",
+    "command": "npm ci && npm run check"
+  },
+  "assets": {
+    "required": [],
+    "optional": []
+  },
+  "registries": {
+    "github": {
+      "required": true
+    }
+  },
+  "retention": {
+    "stable": 1,
+    "prerelease": 1,
+    "failed_draft": 2
+  },
+  "checksums": false,
+  "sbom": false
+}
