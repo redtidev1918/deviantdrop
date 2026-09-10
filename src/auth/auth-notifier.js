@@ -40,7 +40,7 @@ export class AuthNotifier {
         ? { inline_keyboard: [[{ text: kind === "cookie" ? "粘贴更新 Cookie" : "重新登录 DeviantArt", url }]] }
         : undefined;
       const text = kind === "cookie"
-        ? "⚠️ DeviantArt 网页登录已失效\n\nOAuth 仍会自动续期，但成熟多图附加页需要网页会话。\n请对 Bot 发送 /login，并按「粘贴更新 Cookie」或电脑一键登录恢复；无需重启服务。"
+        ? "⚠️ DeviantArt 网页登录已失效\n\nOAuth 仍会自动续期，但成熟多图附加页需要网页会话。\n恢复方式（任选）：\n• 私聊发 /cookie，把浏览器里整行 Cookie 粘给我（最快，无需电脑上的脚本）；\n• 或发 /login 看电脑一键登录命令。\n无需重启服务。"
         : "⚠️ DeviantArt 登录已失效（OAuth 授权）\n\n原因：refresh token 已失效，access token 无法继续自动续期。\n请对 Bot 发送 /login 重新授权；无需重启服务。";
       for (const chatId of this.adminIds) {
         await this.sendTelegram?.("sendMessage", {
