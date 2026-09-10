@@ -8,6 +8,15 @@ import { CredentialStore } from '../src/auth/credential-store.js';
 import { CookieStore } from '../src/auth/cookie-store.js';
 import { join } from 'node:path';
 
+// 国内 VPS 上 deviantart.com 常被 DNS 污染（会解析到 Facebook 之类无关 IP），
+// 容器里默认的直连必然超时。必须和主进程一样走同一个出口代理。
+const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || '';
+if (proxyUrl) {
+  const { Agent, ProxyAgent } = await import('undici');
+  const { createProxyFetch } = await import('../src/network.js');
+  globalThis.fetch = createProxyFetch(new ProxyAgent(proxyUrl), new Agent());
+}
+
 const AUTH_DIR = process.env.AUTH_DIR || '/data/auth';
 const raw = process.argv[2];
 if (!raw) { console.error('missing payload'); process.exit(1); }
