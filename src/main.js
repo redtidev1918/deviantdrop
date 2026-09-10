@@ -26,6 +26,7 @@ import { createAuthRequestHandler } from "./auth/http-auth.js";
 import { createDiskCache } from "./storage/cache.js";
 import { PreviewService } from "./preview/server.js";
 import { TelePress } from "./publishing/telepress.js";
+import { registerCommands } from "./telegram/api.js";
 
 // —— 代理：国内服务器经 clash 等出口访问被墙的 Telegram/DeviantArt ——
 const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || "";
@@ -152,6 +153,8 @@ for (const key of ["BOT_TOKEN", "WEBHOOK_SECRET"]) {
     process.exit(1);
   }
 }
+
+registerCommands(env, adminIds).catch((error) => console.warn("register commands skipped:", error?.message || error));
 
 const port = Number(process.env.PORT || 8080);
 const mode = (process.env.MODE || "poll").toLowerCase();

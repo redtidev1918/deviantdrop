@@ -37,13 +37,11 @@ export class AuthNotifier {
       if (!this.adminIds.length) return;
       const url = await this.buildLoginUrl(kind);
       const keyboard = url
-        ? { inline_keyboard: [[{ text: kind === "cookie" ? "更新 Cookie" : "重新登录 DeviantArt", url }]] }
+        ? { inline_keyboard: [[{ text: kind === "cookie" ? "粘贴更新 Cookie" : "重新登录 DeviantArt", url }]] }
         : undefined;
-      const text =
-        "⚠️ DeviantArt 登录已失效\n\n" +
-        (kind === "cookie" ? "原因：Cookie 会话已失效，请使用 /cookies 更新。\n" : "原因：refresh token invalid。\n") +
-        "成熟内容和部分登录后资源可能只能获得公开预览。\n" +
-        "在 Telegram 对 Bot 发送 /login 即可重新授权（无需重启）。";
+      const text = kind === "cookie"
+        ? "⚠️ DeviantArt 网页登录已失效\n\nOAuth 仍会自动续期，但成熟多图附加页需要网页会话。\n请对 Bot 发送 /login，并按「粘贴更新 Cookie」或电脑一键登录恢复；无需重启服务。"
+        : "⚠️ DeviantArt 登录已失效（OAuth 授权）\n\n原因：refresh token 已失效，access token 无法继续自动续期。\n请对 Bot 发送 /login 重新授权；无需重启服务。";
       for (const chatId of this.adminIds) {
         await this.sendTelegram?.("sendMessage", {
           chat_id: chatId, text,

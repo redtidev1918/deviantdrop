@@ -19,8 +19,8 @@ docker compose up -d --build
 ## 支持范围
 
 - 识别消息与 caption 里的作品链接（`https` / `www` / 旧式域名 / fav.me 等），最多同时处理 5 个。
-- **网页接口优先**（视频 / GIF / 新作品都能取到），**官方 OAuth API 兜底**。
-- 图片 / 多图相册（sendMediaGroup，超过 10 张自动分批）/ GIF / 视频 / 超大图压缩与 document 兜底；Telegram 拉不动 CDN 时自动下载后 multipart 上传。
+- **网页 `_puppy` 接口优先**（视频 / GIF / 新作品 / additionalMedia 都从同一适配器取），网络不可达且配置 OAuth 时用官方 API 兜底。
+- 照片/视频连续片段用 `sendMediaGroup` 相册发送（超过 10 张自动分批）；GIF/animation 始终独立 `sendAnimation`，不会拆散或重复 caption；超大图先压缩，失败再以 document 发送；Telegram 拉不动 CDN 时自动下载后 multipart 上传。
 - `/start` `/help` `/about` 命令；每聊天限流、去重、429/500/503 退避重试。
 
 ### 群聊与频道
@@ -33,17 +33,17 @@ docker compose up -d --build
 
 管理命令（`/login`、`/status`）只允许 **Bot 所有者**使用：在 `.env` 设置 `ADMIN_IDS=<你的 Telegram 用户 ID>`。未配置时管理命令一律拒绝；普通使用者白名单（`ALLOWED_USER_IDS`）不是管理员。
 
-**登录一次，多图作品的所有画面（含成熟作品的附加页）都会未打码发送。** 登录同时建立账号授权（OAuth）和网页登录状态（Cookie），二者都立即在服务器生效，**无需手动复制 Cookie、无需改配置、无需重启**。
+DeviantArt 有两套相互独立的登录状态：**OAuth** 负责官方 API；**Web session（auth/auth_secure/userinfo Cookie）**负责成熟作品和多图 `additionalMedia`。任一套失效都不会自动等于另一套失效。
 
 - **推荐：电脑一键登录（无公网域名也能用）**。在你的电脑上（需装有 Chrome/Edge），于 DeviantDrop 目录运行：
   ```bash
   VPS=root@<你的服务器> npm run login
   ```
-  脚本会自动打开 Chrome 进入 DeviantArt 官方登录页：你登录并点「Authorize/允许」，脚本自动把授权和网页登录状态推送到服务器并热生效。DA 的登录页有 AWS WAF 人机校验，用你自己的真实浏览器登录即可正常通过（这也是必须在你电脑上、而不是在服务器上跑浏览器的原因）。Windows/Linux 同样适用；服务器地址可用 `VPS=` 环境变量传入，不传会交互询问。完成后 `/status` 显示 `OAuth: valid`、`Cookie: available`。
-- **有公网域名（`PUBLIC_BASE_URL`）**：在 Telegram 私聊发 `/login`，点按钮在浏览器授权即可（仅建立 OAuth；想要附加页也未打码，仍建议用上面的电脑一键登录，它会一并登录网页）。
-- **`/status`（所有者私聊）**：查看 Telegram / OAuth / Cookie / TelePress / Cache 状态（不显示任何密钥）。
-- `DA_REFRESH_TOKEN` / `DA_COOKIES` 只作为**首次迁移 seed**：启动时写入 `/data/auth/deviantart.json` 与 `/data/auth/deviantart-cookies.json`，之后以这些文件为准（refresh token 轮换即落盘、失效自动标记；Cookie 支持热更新），不再回退读 .env 里的旧值。
-- 登录失效时 Bot 所有者收到带「重新登录」按钮的通知（6 小时冷却，恢复后另发一次恢复通知）。
+  脚本会自动打开 Chrome 进入 DeviantArt 官方登录页：你登录并点「Authorize/允许」，脚本同时保存 OAuth 与 Web session 并热生效。DA 的登录页有 AWS WAF 人机校验，用你自己的真实浏览器登录即可正常通过。完成后 `/status` 显示 `OAuth: valid`、`Web session: valid`。
+- **有公网域名（`PUBLIC_BASE_URL`）**：私聊发 `/login`；首次配置或 refresh token 失效时点 OAuth 授权按钮。公网页面不能跨域写入 DA Cookie，网页会话入口用于粘贴新 Cookie；不想手动复制时用上面的电脑一键登录。
+- **`/status`（所有者私聊）**：主动探测并显示 `Web session: missing|unknown|valid|expired` 与 OAuth 状态（不显示任何密钥）。网络超时、WAF、5xx 只会显示 `unknown`，不会误判为过期；只有登录跳转或 `mature_loggedout` 才标记 `expired`。
+- `DA_REFRESH_TOKEN` / `DA_COOKIES` 只作为**首次迁移 seed**：启动后分别写入 OAuth 与 Web session 文件，refresh token 轮换即落盘；Web Cookie 支持热更新，不再回退读 .env 旧值。
+- OAuth 或 Web session 失效时 Bot 所有者分别收到带对应登录入口的通知（6 小时冷却，恢复后另发一次恢复通知）。
 
 ### 回复排版
 

@@ -25,7 +25,7 @@ VPS=root@<VPS-IP> npm run login        # 等价于 node scripts/dd-login.mjs
 - 链路：`dd-login.mjs`（本机）→ ssh → `scripts/dd-receive.sh`（VPS 宿主）→ `docker cp` + `dd-exchange.mjs`（容器内，以 node 用户写 `/data/auth`）。
 - 失败不污染凭据：兑换失败（如 code 过期）直接报错退出，不覆盖现有 token/Cookie。
 
-有公网域名时 `/login` 内按钮仅建立 OAuth；想让成熟作品的**附加页**也未打码，仍需网页登录态，请用上面的电脑一键登录。两种方式写的是同一份 `/data/auth/deviantart.json` 与 `deviantart-cookies.json`，轮换/失效处理一致。
+有公网域名时 `/login` 会分别给出 OAuth 与「粘贴更新 Cookie」入口：OAuth 仍有效就无需重新授权；成熟作品的**附加页**只需要新的 Web session。浏览器不能跨 deviantart.com 写 Cookie，所以公网入口采用一次性表单粘贴；不想手动复制时用电脑一键登录自动建立两者。两者分别写入 `/data/auth/deviantart.json` 与 `deviantart-cookies.json`，轮换/失效通知也分开处理。
 
 应用不能代替你在 DeviantArt 完成登录或同意授权——浏览器始终在真实 DA 站点完成登录，脚本只读取登录结果。
 
@@ -33,7 +33,7 @@ VPS=root@<VPS-IP> npm run login        # 等价于 node scripts/dd-login.mjs
 
 ## 未打码与网页登录态
 
-成熟（Mature）作品：仅 OAuth 时官方 API 只返回主图、不返回多图附加页，匿名网页接口对原始文件返回 403/打码。**带网页登录 Cookie 请求 `_puppy/dadeviation/init` 时，附加页（`deviation.extended.additionalMedia`）下发的是未打码原始文件签名链接**——媒体下载本身走签名 CDN，无需再带 Cookie。因此一键登录同时建立 OAuth + 网页 Cookie 后，成熟多图作品的所有画面都会未打码发送；没有网页 Cookie 时附加页仍按原策略跳过并提示去作品页查看（不发打码图）。判定逻辑见 `shouldSkipMatureExtras`。
+成熟（Mature）作品：仅 OAuth 时官方 API 只返回主图、不返回多图附加页；匿名网页接口会返回 `isMature=true`、`isBlocked=true`、`blockReasons` 含 `mature_loggedout`。这个明确信号才把 Web session 标记为 `expired`，超时、WAF、5xx 一律保持 `unknown`。**带有效 Web session 请求 `_puppy/dadeviation/init` 时，附加页（`deviation.extended.additionalMedia`）下发未打码签名链接**；媒体下载本身走签名 CDN，无需再带 Cookie。没有有效 Web session 时跳过成熟附加页并提示去作品页查看，不发送打码图。判定逻辑见 `media-normalizer.js` 的 `shouldSkipMatureExtras`。
 
 ## 持久化与迁移
 
@@ -49,6 +49,8 @@ access token 和 DA 网页 session 只放内存，旧通用缓存中的 token/se
 
 `DA_COOKIES`、`DA_REFRESH_TOKEN` 兼容为首次 seed；后续更新请使用管理入口。`npm run login` 仅作本地开发辅助，写入本地 CredentialStore，不打印 token，也不自动上传 VPS。
 
+`/status` 会主动访问 DeviantArt 首页验证 Web session，并显示 `missing`、`unknown`、`valid`、`expired` 四态。文件里存在 Cookie 只代表“有待验证的会话”，不直接显示 valid；网络失败不清除 Cookie，也不要求重新登录。
+
 ## Preview Fixer
 
 `/d/:id` 提供标题、作者、canonical 原站入口和 OG metadata；正常 Bot 解析顺手记住作品 ID 与来源。Crawler 首次访问补一次匿名 [oEmbed](https://deviantart.readme.io/docs/oembed)，元数据缓存一小时。未知 ID 只做有限的原站 canonical 解析。失败短缓存，避免每次爬取反复请求 DA。
@@ -59,7 +61,7 @@ access token 和 DA 网页 session 只放内存，旧通用缓存中的 token/se
 
 ## Telegram 排版与 TelePress
 
-媒体 caption 只放标题/作者/数量/状态，不含链接或 entity（multipart 上传端点对自定义 `caption_entities` 的 offset 处理有 bug，含 emoji 时高亮错位，2026-09 实测）。来源用**一个可靠、不重复的可点入口**：单图/单视频走 inline 按钮「🔗 在 DeviantArt 打开」（按钮在 JSON 传 URL / file_id 重放 / multipart 上传各路径都生效）；相册（`sendMediaGroup` 任何方式都静默丢弃按钮）则在发送后补发一条 JSON `sendMessage` 文本，来源用 `text_link`（JSON 路径 UTF-16 始终正确）。压缩/预览/文档状态随 file_id 重放保留；单文件重放带按钮、相册重放补发来源文本。>10 张的尾部单图用 sendPhoto，sendMediaGroup 始终 2–10 项。
+媒体由同一个纯 planner 决定发送单元：连续 photo/video 才进入 `sendMediaGroup`，每 2–10 项一组；GIF/animation 不能进入 Telegram media group，始终独立 `sendAnimation`。caption、状态和来源只归属第一个发送单元，后续媒体不带重复 caption。URL 直发、multipart 上传与 file_id 重放共用同一 planner，避免三条路径行为不一致。来源用**一个可靠、不重复的可点入口**：单媒体走 inline 按钮；相册在发送后补发一条 `text_link` 来源文本。
 
 `TELEPRESS_URL` 未设置时无额外依赖。设置后默认 `TELEPRESS_MODE=fallback`；`large-gallery` 为纯图片 >10 张生成可选图集，`always` 仅明确选择时使用，`off` 完全关闭。视频/GIF 不转 Telegraph。缓存同作品 URL 90 天，重复使用，不反复创建页面。额外 Telegraph 入口才发送按钮消息；配置了公网预览域名时该消息的 link_preview_options 指向本站。
 
