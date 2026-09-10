@@ -29,7 +29,11 @@ gh api repos/redtidev1918/releasegraph/contents/.github/workflows/reusable-relea
   | grep -E '^\s+(contents|pull-requests|packages|issues|id-token):'
 ```
 
-注意：同账户其他受管仓库（dakit / telepress / pixivflow-webui …）当前 caller 也不含 `issues: write`，它们下一次 push 会踩到同一个坑，需要各自补齐。
+同账户其他受管仓库也踩到了同一个坑，2026-09-10 已统一补齐 `issues: write`（各仓库 Release 运行随即恢复 `success`）：
+
+`dakit`、`daviewer`、`deviantart-downloader`、`graf`、`ludum`、`NekoTime`、`paranote`、`pixiv-token-getter`、`pixivflow-telepost-deploy`、`pixivflow-webui`、`TelePost`、`telepress`（`PixivFlow` 本来就有该权限；`releasegraph` 自己走 `infra-release.yml`，不受影响）。
+
+升级引擎时的通用做法：引擎发布新 minor 后先看复用工作流各 job 的权限集合，把调用方 `permissions` 一次性对齐，再跑一次 Release 确认不再是 `startup_failure`。
 
 ## 下一代协议：暂不可用，等引擎发布后再切
 
