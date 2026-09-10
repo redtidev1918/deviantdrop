@@ -22,18 +22,20 @@ test('photo and video remain together; eleven album items split with caption onl
   assert.equal(plan[1].primary, false);
 });
 
-test('mature_loggedout is explicit web expiry and mature extras remain unavailable', () => {
+test('mature_loggedout marks the response unauthorized: only extra pages are skipped', () => {
   const deviation = {
     isMature: true,
     isBlocked: true,
     isMultiMedia: true,
     blockReasons: ['mature_filter', 'mature_loggedout'],
-    media: { baseUri: 'https://cdn.test/blur.jpg', token: 'blur' },
+    media: { baseUri: 'https://cdn.test/blur_x1.jpg', token: 'blur' },
     extended: { additionalMedia: [{ media: { baseUri: 'https://cdn.test/extra.png', token: 'x' } }] },
   };
   assert.equal(isMatureLoggedOut(deviation), true);
-  const artwork = normalizeArtwork(deviation, { sourceUrl: 'https://www.deviantart.com/a/art/x-1', webStatus: 'expired' });
+  const artwork = normalizeArtwork(deviation, { sourceUrl: 'https://www.deviantart.com/a/art/x-1', expansionAuthorized: false });
+  assert.equal(artwork.expansionAuthorized, false);
   assert.equal(artwork.media.length, 1);
   assert.equal(artwork.skippedMedia, 1);
-  assert.equal(artwork.accessStatus, 'mature_loggedout');
+  // 主图由 OAuth 层负责；normalizer 只如实标注网页给的是打码文件。
+  assert.equal(artwork.media[0].originalAvailable, false);
 });

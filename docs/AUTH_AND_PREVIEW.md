@@ -25,17 +25,31 @@ VPS=root@<VPS-IP> npm run login        # 等价于 node scripts/dd-login.mjs
 - 链路：`dd-login.mjs`（本机）→ ssh → `scripts/dd-receive.sh`（VPS 宿主）→ `docker cp` + `dd-exchange.mjs`（容器内，以 node 用户写 `/data/auth`）。
 - 失败不污染凭据：兑换失败（如 code 过期）直接报错退出，不覆盖现有 token/Cookie。
 
-有公网域名时 `/login` 会分别给出 OAuth 与「粘贴更新 Cookie」入口：OAuth 仍有效就无需重新授权；成熟作品的**附加页**只需要新的 Web session。浏览器不能跨 deviantart.com 写 Cookie，所以公网入口采用一次性表单粘贴；不想手动复制时用电脑一键登录自动建立两者。两者分别写入 `/data/auth/deviantart.json` 与 `deviantart-cookies.json`，轮换/失效通知也分开处理。
+有公网域名时 `/login` 会分别给出 OAuth 与「更新多图扩展」入口：OAuth 仍有效就无需重新授权；只有想要完整多图附加页时才需要扩展会话。浏览器不能跨 deviantart.com 写 Cookie，所以公网入口采用一次性表单粘贴；不想手动复制时用电脑一键登录自动建立两者。两者分别写入 `/data/auth/deviantart.json` 与 `deviantart-cookies.json`，轮换/失效通知也分开处理。
 
 应用不能代替你在 DeviantArt 完成登录或同意授权——浏览器始终在真实 DA 站点完成登录，脚本只读取登录结果。
 
-没有公网域名、也没有电脑时，可在私聊直接发 `/cookie <整行 Cookie>`：Bot 用 `CookieStore.set()` 热更新，随后强制探测一次并回报 `valid`/`unknown`，同时尽力删除含凭据的原消息。该路径的取舍是把会话凭据经由 Telegram 传输，需要时可用 DA 的「退出所有设备」使其作废。
+没有公网域名、也没有电脑时，可在私聊直接发 `/cookie <整行 Cookie>`：Bot 用 `CookieStore.set()` 热更新，随后强制探测一次并回报 `valid`/`unknown`，同时尽力删除含凭据的原消息。该路径的取舍是把会话凭据经由 Telegram 传输，需要时可用 DA 的「退出所有设备」使其作废。它恢复的是**多图扩展能力**，不是「成熟内容权限」。
 
 反向代理应关闭 `/auth/` 的带 query access log，避免记录一次性 token/code；可用 `access_log off` 作用于该路径。本站认证响应 `no-store`、`no-referrer`，禁止 iframe。
 
-## 未打码与网页登录态
+## 认证模型：OAuth 主认证 + 可选的网页扩展
 
-成熟（Mature）作品：仅 OAuth 时官方 API 只返回主图、不返回多图附加页；匿名网页接口会返回 `isMature=true`、`isBlocked=true`、`blockReasons` 含 `mature_loggedout`。这个明确信号才把 Web session 标记为 `expired`，超时、WAF、5xx 一律保持 `unknown`。**带有效 Web session 请求 `_puppy/dadeviation/init` 时，附加页（`deviation.extended.additionalMedia`）下发未打码签名链接**；媒体下载本身走签名 CDN，无需再带 Cookie。没有有效 Web session 时跳过成熟附加页并提示去作品页查看，不发送打码图。判定逻辑见 `media-normalizer.js` 的 `shouldSkipMatureExtras`。
+两层能力互相独立，代码里也按这个边界实现（唯一决策点在 `src/deviantart/adapter.js`）：
+
+| 层 | 职责 |
+| --- | --- |
+| **OAuth（官方 API）** | 内容访问主认证层：metadata、**mature 主图**、官方 download/content、refresh token 续期 |
+| **网页扩展会话** | 可选增强：官方 API 不提供的 `deviation.extended.additionalMedia`（多图第 2…N 页） |
+
+要求：**Cookie 失效绝不能让成熟作品整体失败**。因此成熟主图的可用性由 OAuth 决定，网页扩展失败的影响被局部化到附加页。
+
+- 解析流程：网页 `_puppy/dadeviation/init` 提供作品结构（数字 ID 直达，无需 UUID 映射）与 `extended.deviationUuid`；成熟作品的**主图**一律优先用官方 API 的 `content`/`download` 覆盖，因此未打码与 Cookie 无关。
+- 网页 DTO 缺少 uuid 时（被 block 的响应常见），会再走一次 uuid 解析，保证「只有 OAuth、没有 Cookie」也能拿回未打码主图。
+- 官方 API 失败（网络/额度/凭据）不会中断发送：保留网页结果继续发，并打结构化日志 `[da] OAuth 主图替换失败`。
+- 扩展能力**只由本次响应决定**，不看任何缓存状态：可用但状态未知的 Cookie 不会丢页，状态写着 valid 的旧 Cookie 也不会假装能取。响应里逐条检查打码 URL（`blur_`），只跳过打码的那一页。
+- `mature_loggedout`（`isMature=true` + `isBlocked=true` + `blockReasons` 含它）只用于**会话记账**：标记 `expired`、清缓存、通知一次、匿名重试。它从不用于拒绝作品。超时、WAF、5xx 保持 `unknown`。
+- 只有一条路径会产生「打码预览」提示：既没有 OAuth、网页响应也未授权时。此时主图标记为不可用并写明「仅能获取打码预览」，不伪装成完整结果。
 
 ## 持久化与迁移
 
@@ -47,11 +61,11 @@ VPS=root@<VPS-IP> npm run login        # 等价于 node scripts/dd-login.mjs
 
 复用已有 Docker `cache:/data` 卷，无需创建新的卷。禁止删除卷进行升级。升级前备份整个卷。
 
-access token 和 DA 网页 session 只放内存，旧通用缓存中的 token/session 会在启动时清理。refresh token 刷新串行，避免同时兑换同一个轮换凭据。首次迁移优先旧 `/data/refresh_token`（兼容 `REFRESH_TOKEN_FILE`），再用 `DA_REFRESH_TOKEN`；已有 store 后绝不回退 env。文件损坏视为失效，重新登录；明确 invalid_grant 会清空 token。写盘失败会报错，不假报保存成功。
+access token 与网页 `_puppy` 会话（CSRF + Cookie 复用）只放内存，旧通用缓存中的 token/session 会在启动时清理。refresh token 刷新串行，避免同时兑换同一个轮换凭据。首次迁移优先旧 `/data/refresh_token`（兼容 `REFRESH_TOKEN_FILE`），再用 `DA_REFRESH_TOKEN`；已有 store 后绝不回退 env。文件损坏视为失效，重新登录；明确 invalid_grant 会清空 token。写盘失败会报错，不假报保存成功。
 
 `DA_COOKIES`、`DA_REFRESH_TOKEN` 兼容为首次 seed；后续更新请使用管理入口。`npm run login` 仅作本地开发辅助，写入本地 CredentialStore，不打印 token，也不自动上传 VPS。
 
-`/status` 会主动访问 DeviantArt 首页验证 Web session，并显示 `missing`、`unknown`、`valid`、`expired` 四态。文件里存在 Cookie 只代表“有待验证的会话”，不直接显示 valid；网络失败不清除 Cookie，也不要求重新登录。
+`/status` 分别显示 `OAuth API:` 与 `Multi-image web expansion: missing|unknown|valid|expired` 两条独立状态，前者只看 OAuth 凭据，后者才去探测网页会话。文件里存在 Cookie 只代表“有待验证的扩展会话”，不直接显示 valid；网络失败不清除 Cookie，也不要求重新登录，更不会影响 OAuth 状态。
 
 ## Preview Fixer
 

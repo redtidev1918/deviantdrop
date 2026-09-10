@@ -82,7 +82,7 @@ test("AuthNotifier：失效通知 6h 冷却只发一次；恢复后通知一次�
   await notifier.notifyInvalid("refresh token invalid");
   await notifier.notifyInvalid("refresh token invalid"); // 冷却中，不再发
   assert.equal(sent.length, 1, "6h 冷却内只通知一次");
-  assert.match(sent[0].body.text, /DeviantArt 登录已失效/);
+  assert.match(sent[0].body.text, /OAuth 授权已失效/);
   assert.ok(sent[0].body.reply_markup?.inline_keyboard?.[0]?.[0]?.url, "失效通知应带重新登录按钮");
 
   // 恢复：应发一次恢复通知并清冷却

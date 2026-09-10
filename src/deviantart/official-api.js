@@ -1,7 +1,7 @@
 import { getOfficialToken, clearOAuthAccessToken } from '../auth/token.js';
 import { AuthError, AuthRevokedError, NetworkError, NotFoundError, PermissionDeniedError, RateLimitError } from '../auth/errors.js';
 import { DA_HEADERS } from './http.js';
-import { pickDescriptorMedia, displayMediaUrl } from './media-normalizer.js';
+import { pickDescriptorMedia, displayMediaUrl, kindOfUrl, mimeForKind } from './media-normalizer.js';
 
 export const DA_API_BASE = 'https://www.deviantart.com/api/v1/oauth2/';
 const DA_MINOR_VERSION = '20240701';
@@ -46,16 +46,18 @@ export async function pickOfficialMediaUrl(env, deviation, uuid, wantOriginal = 
 export function normalizeOfficialArtwork(deviation, { sourceUrl } = {}) {
   const url = deviation?.content?.src || deviation?.thumbs?.[0]?.src || deviation?.preview?.src;
   if (!url) throw new Error('作品没有可用的公开媒体');
-  const kind = /\.gif($|\?)/i.test(url) ? 'animation' : /\.mp4($|\?)/i.test(url) ? 'video' : 'photo';
+  const kind = kindOfUrl(url);
   return {
     uuid: deviation.deviationid || null,
     title: deviation.title || 'DeviantArt',
     author: deviation.author?.username || null,
     sourceUrl,
     mature: deviation.is_mature === true,
-    media: [{ kind, url, fallbackUrl: deviation.preview?.src || null, mimeType: kind === 'animation' ? 'image/gif' : kind === 'video' ? 'video/mp4' : 'image/jpeg', originalAvailable: !!deviation.content?.src }],
+    // 官方 API 完全不提供 additionalMedia：这条路径没有网页扩展能力。
+    expansionAuthorized: false,
+    mainSource: 'oauth',
+    media: [{ kind, url, fallbackUrl: deviation.preview?.src || null, mimeType: mimeForKind(kind), originalAvailable: !!deviation.content?.src }],
     skippedMedia: 0,
-    webStatus: 'missing',
   };
 }
 

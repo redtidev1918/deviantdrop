@@ -19,7 +19,7 @@ export const SOURCE_BUTTON_TEXT = "🔗 在 DeviantArt 打开";
 
 // 媒体 caption（无来源、无 entity，避免 multipart offset bug）。返回 { text }。
 // opts.showNotes=false 时省略技术性 ⚠️ 提示（压缩/打码/原图不可用/转文件）：
-// 这些对运营者排查有用，对群里看图的人是噪音，群聊默认不显示（见 index.js 的 captionNotesEnabled）。
+// 这些对运营者排查有用，对群里看图的人是噪音，群聊默认不显示（见 telegram/sender.js 的 notesEnabled）。
 export function renderArtworkCaption(meta = {}, status = {}, { showNotes = true } = {}) {
   const lines = [];
   const title = (meta.title || "DeviantArt 作品").trim();
@@ -31,7 +31,8 @@ export function renderArtworkCaption(meta = {}, status = {}, { showNotes = true 
   if (showNotes) {
     const notes = [];
     if (status.compressed) notes.push("部分图片超过 10MB，已压缩发送");
-    if (status.blurredPreview) notes.push("部分成熟内容无法获取未打码画面，请在原站查看");
+    if (status.skippedPages) notes.push("部分附加图片暂时无法获取，请在原站查看");
+    if (status.blurredPreview) notes.push("仅能获取打码预览，请在原站查看");
     if (status.previewOnly) notes.push("原图暂不可用，已使用高清展示图");
     if (status.docFallback) notes.push("图片过大，已作为文件发送");
     if (notes.length) lines.push(`⚠️ ${notes.join("；")}`);

@@ -39,7 +39,7 @@ test('/cookie saves the pasted web session, verifies it, and deletes the secret 
   assert.equal(cookieStore.getCookies(), 'auth=abc; auth_secure=def; userinfo=ghi');
   assert.equal(cookieStore.getState().state, 'valid');
   assert.ok(calls.some((call) => call.method === 'deleteMessage' && call.body.message_id === 7), 'should try to delete the message holding the secret');
-  assert.match(calls.at(-1).body.text, /网页会话已更新并验证有效/);
+  assert.match(calls.at(-1).body.text, /多图扩展会话已更新并验证有效/);
 });
 
 test('/cookie rejects a malformed value and keeps the old session', async (t) => {

@@ -60,11 +60,10 @@ test("selects the highest-quality DeviantArt video", () => {
     extractDeviantArtMedia({ title: "Image", media: { baseUri: "https://images.wixmp.com/work.jpg" } }).kind,
     "photo",
   );
-  // 成熟内容：明确报错而不是返回打码/400 的地址
-  assert.throws(
-    () => extractDeviantArtMedia({ title: "NSFW", isMature: true, media: { baseUri: "https://images.wixmp.com/x.jpg" } }),
-    /需登录查看的成熟内容/,
-  );
+  // 成熟内容不再被解析层拒绝：主图由 OAuth 负责，这里只如实返回网页结果。
+  const mature = extractDeviantArtMedia({ title: "NSFW", isMature: true, media: { baseUri: "https://images.wixmp.com/x.jpg" } });
+  assert.equal(mature.kind, "photo");
+  assert.equal(mature.url, "https://images.wixmp.com/x.jpg");
 });
 
 test("resolves two links with one DeviantArt session and serves the signed proxy", async (t) => {
@@ -838,7 +837,8 @@ test("/status 与 /login：管理员可用、/status 不泄漏 secret、非管�
   await handleUpdate({ update_id: 1, message: { message_id: 1, from: { id: 42 }, chat: { id: 42, type: "private" }, text: "/status" } }, env);
   const status = sends.find((s) => s.method === "sendMessage")?.body.text || "";
   assert.match(status, /DeviantDrop Status/);
-  assert.match(status, /OAuth: valid/);
+  assert.match(status, /OAuth API: ✅ valid/);
+  assert.match(status, /Multi-image web expansion: /);
   assert.match(status, /TelePress: large-gallery/);
   assert.doesNotMatch(status, /secret-refresh-token|cookie-secret|111:secret/, "/status 不得泄漏任何凭据");
 

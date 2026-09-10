@@ -77,15 +77,6 @@ async function sendPublishedLink(message, env, id, sourceUrl, publishedUrl) {
 function preferOriginal(env) {
   return /^(1|true|yes)$/i.test(String(env?.PREFER_ORIGINAL || ""));
 }
-// 技术性 ⚠️ 提示（压缩/打码/原图不可用/转文件）是否显示在 caption 里。
-// 默认 auto：私聊（自己/运营排查）显示，群聊/频道（看图的人）隐藏——对他们是噪音，
-// 且已有「在 DeviantArt 打开」入口可去看原图。CAPTION_NOTES=always/never 强制覆盖。
-function captionNotesEnabled(env, message) {
-  const mode = String(env?.CAPTION_NOTES || "auto").trim().toLowerCase();
-  if (mode === "always" || /^(1|true|yes)$/.test(mode)) return true;
-  if (mode === "never" || /^(0|false|no|off)$/.test(mode)) return false;
-  return message?.chat?.type === "private";
-}
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -333,17 +324,17 @@ async function handleAdminCommand(command, message, env) {
     return;
   }
 
-  // /cookie：在 TG 私聊里直接刷新网页会话（成熟作品的附加页需要它）。
-  // 用法：从已登录 DA 的浏览器复制整行 Cookie 后发送 `/cookie auth=…; auth_secure=…; userinfo=…`。
+  // /cookie：在 TG 私聊里刷新「多图扩展会话」。它只恢复附加页能力，
+  // 不是成熟内容登录：mature 主图由 OAuth API 负责。
   if (command === "cookie" || command === "cookies") {
     if (!env.cookieStore) {
-      await send("这台部署没有 CookieStore（用 DA_COOKIES 环境变量注入），无法在聊天里更新网页会话。");
+      await send("这台部署没有 CookieStore（用 DA_COOKIES 环境变量注入），无法在聊天里更新多图扩展会话。");
       return;
     }
     const raw = (message.text ?? "").replace(/^\/cookies?(?:@\w+)?\s*/i, "").trim();
     if (!raw) {
       await send(
-        "刷新 DeviantArt 网页会话（成熟多图未打码需要它）：\n\n" +
+        "刷新 DeviantArt 多图扩展会话（官方 API 不提供的附加页用它获取）：\n\n" +
         "1. 在已登录 DA 的浏览器里打开 DevTools → Network，刷新页面；\n" +
         "2. 点任一 `www.deviantart.com` 请求 → Headers → Request Headers；\n" +
         "3. 复制整行 `Cookie:` 的值，然后发给我：\n\n" +
@@ -367,12 +358,13 @@ async function handleAdminCommand(command, message, env) {
     } catch {
       status = WEB_SESSION_STATUS.UNKNOWN;
     }
+    const tail = deleted ? "含 Cookie 的消息已删除。" : "请手动删除刚才那条含 Cookie 的消息。";
     if (status === WEB_SESSION_STATUS.VALID) {
       await env.authNotifier?.notifyRecovered("cookie");
-      await send(`✅ 网页会话已更新并验证有效，成熟多图会取未打码原图。${deleted ? "含 Cookie 的消息已删除。" : "请手动删除刚才那条含 Cookie 的消息。"}`);
+      await send(`✅ 多图扩展会话已更新并验证有效，多图作品的附加页可以正常获取。${tail}`);
       return;
     }
-    await send(`⚠️ Cookie 已保存但验证结果：${status}。请重新复制整行 Cookie（需含 auth/auth_secure/userinfo）；网络波动时也会显示 unknown，可稍后用 /status 复查。`);
+    await send(`⚠️ Cookie 已保存但验证结果：${status}。请重新复制整行 Cookie（需含 auth/auth_secure/userinfo）；网络波动时也会显示 unknown，可稍后用 /status 复查。\n注意：这不影响单图与官方 API 可获取的内容。`);
     return;
   }
 
@@ -386,55 +378,74 @@ async function handleAdminCommand(command, message, env) {
       if (hasOauth) {
         const cookieToken = authFlow.issueLoginToken("cookies");
         const cookieUrl = `${env.PUBLIC_BASE_URL.replace(/\/$/, "")}/auth/deviantart/cookies?t=${encodeURIComponent(cookieToken)}`;
-        keyboard.push([{ text: "粘贴更新 Cookie", url: cookieUrl }]);
+        keyboard.push([{ text: "更新多图扩展", url: cookieUrl }]);
       }
       await send(
         hasOauth
-          ? "OAuth 仍有效。成熟多图需要 DeviantArt 网页会话；可点「粘贴更新 Cookie」，或用电脑一键登录自动更新。"
-          : "点击「登录 DeviantArt」完成 OAuth 授权。成熟多图还需要网页会话；无公网浏览器登录时用电脑一键登录同时更新两者。",
+          ? "OAuth 仍有效（成熟主图与官方 API 由它负责）。这里只需在你想要完整多图附加页时更新扩展会话：可点「更新多图扩展」，或用电脑一键登录自动更新两者。"
+          : "点击「登录 DeviantArt」完成 OAuth 授权（内容访问主认证层）。多图附加页另外需要网页扩展会话；无公网浏览器登录时用电脑一键登录同时更新两者。",
         { reply_markup: { inline_keyboard: keyboard } },
       );
       return;
     }
     await send(
-      "DeviantArt 一键登录（同时登录账号 + 网页，多图作品全部未打码）：\n\n" +
+      "DeviantArt 一键登录（同时建立 OAuth 与多图扩展会话）：\n\n" +
       "1. 在你的电脑上打开终端，进入 DeviantDrop 目录；\n" +
       "2. 运行：`VPS=root@<你的服务器> node scripts/dd-login.mjs`；\n" +
       "3. 会自动打开 Chrome，在 DeviantArt 官方页登录并点「Authorize/允许」；\n" +
       "4. 脚本自动把登录状态推送到服务器并立即生效，无需重启、无需手动复制 Cookie。\n\n" +
-      "需要电脑装有 Chrome；服务器地址按实际填写。完成后发 /status 应显示 OAuth: valid、Web session: valid。\n\n" +
-      "没有电脑时：用 /cookie 把浏览器里的整行 Cookie 直接发给我即可刷新网页会话。",
+      "需要电脑装有 Chrome；服务器地址按实际填写。完成后发 /status 应显示 OAuth API: valid、Multi-image web expansion: valid。\n\n" +
+      "没有电脑时：用 /cookie 把浏览器里的整行 Cookie 直接发给我即可恢复多图附加页。",
     );
     return;
   }
 
   if (command === "status") {
+    // 语义：OAuth = 内容访问主认证层；Web 会话 = 可选的多图附加页扩展能力。
+    // 两者各自反映自己的真实状态，绝不互相代替（旧实现把 API 状态取自 web 探针，属于错误耦合）。
     const store = env.credentialStore;
     const authState = store ? store.getState() : null;
     const oauthText = authState
-      ? (authState.state === "valid" && authState.hasToken ? "valid" : authState.state === "invalid" ? "invalid（需 /login）" : "missing")
-      : (env.DA_REFRESH_TOKEN ? "unknown" : "missing");
-    let webText = (env.cookieStore?.available() || env.DA_COOKIES) ? "checking…" : "missing";
-    let apiText = "checking…";
+      ? (authState.state === "valid" && authState.hasToken ? "✅ valid"
+        : authState.state === "invalid" ? "❌ invalid（发 /login 重新授权）"
+          : "未配置（官方 API 与成熟主图不可用）")
+      : (env.DA_REFRESH_TOKEN ? "unknown" : "未配置（官方 API 与成熟主图不可用）");
+    const hasCookie = Boolean(env.cookieStore?.available() || env.DA_COOKIES);
+    let expansionStatus = hasCookie ? WEB_SESSION_STATUS.UNKNOWN : WEB_SESSION_STATUS.MISSING;
+    let expansionText = hasCookie ? "checking…" : "missing";
     const teleText = env.telepress ? env.telepress.mode : "disabled";
+    const hint = () => {
+      if (expansionStatus === WEB_SESSION_STATUS.EXPIRED) {
+        return "\n多图附加页可能暂时无法获取；单图与官方 API 可获取内容不受影响。\n恢复：私聊发 /cookie 粘一行 Cookie，或用电脑跑 npm run login。";
+      }
+      if (expansionStatus === WEB_SESSION_STATUS.MISSING) {
+        return "\n未保存网页会话：成熟多图的附加页会跳过；普通作品与单图不受影响。";
+      }
+      return "";
+    };
     const renderLines = () => [
-      "DeviantDrop Status", "", "Telegram: OK", `DeviantArt API: ${apiText}`,
-      `OAuth: ${oauthText}`, `Web session: ${webText}`, `TelePress: ${teleText}`,
+      "DeviantDrop Status", "",
+      "Telegram: OK",
+      `OAuth API: ${oauthText}`,
+      `Multi-image web expansion: ${expansionText}`,
+      `TelePress: ${teleText}`,
       `Cache: ${cacheApi() ? "OK" : "未配置"}`,
-      ...(webText.startsWith("expired") ? ["", "成熟多图需要重新网页登录：/login"] : []),
+      hint(),
     ].join("\n");
     const statusMessage = await send(renderLines());
-    let webStatus = WEB_SESSION_STATUS.UNKNOWN;
-    try {
-      webStatus = webText === "checking…" ? await probeWebSession(env, { force: true, cacheGet, cacheSet }) : WEB_SESSION_STATUS.MISSING;
-    } catch { webStatus = WEB_SESSION_STATUS.UNKNOWN; }
-    webText = {
-      [WEB_SESSION_STATUS.VALID]: "valid",
-      [WEB_SESSION_STATUS.EXPIRED]: "expired",
+    if (hasCookie) {
+      try {
+        expansionStatus = await probeWebSession(env, { force: true, cacheGet, cacheSet });
+      } catch {
+        expansionStatus = WEB_SESSION_STATUS.UNKNOWN;
+      }
+    }
+    expansionText = {
+      [WEB_SESSION_STATUS.VALID]: "✅ valid",
+      [WEB_SESSION_STATUS.EXPIRED]: "⚠️ expired",
       [WEB_SESSION_STATUS.MISSING]: "missing",
       [WEB_SESSION_STATUS.UNKNOWN]: "unknown（DA 当前无法验证）",
-    }[webStatus] || "unknown";
-    apiText = webStatus === WEB_SESSION_STATUS.UNKNOWN ? "unknown" : "OK";
+    }[expansionStatus] || "unknown";
     if (statusMessage?.message_id) {
       await telegram(env, "editMessageText", { chat_id: message.chat.id, message_id: statusMessage.message_id, text: renderLines() }).catch(() => {});
     }
@@ -527,7 +538,9 @@ async function sendDeviantArt(url, message, env, origin, sessionMemo = {}, onSta
     status: {},
     text: null,
   };
-  if (artwork.skippedMedia > 0 || (artwork.mature && artwork.media.some((item) => !item.originalAvailable))) cap.status.blurredPreview = true;
+  // 两种缺页原因分开表达：附加页拿不到 ≠ 成熟内容没权限。
+  if (artwork.skippedMedia > 0) cap.status.skippedPages = true;
+  if (artwork.mature && artwork.media.some((item) => !item.originalAvailable)) cap.status.blurredPreview = true;
   try { await env.preview?.remember({ id: target.id, ...cap }); } catch { /* preview must not block delivery */ }
 
   const items = await Promise.all(artwork.media.map(async (item) => ({
@@ -563,11 +576,10 @@ function toPublisherMedia(artwork) {
   };
 }
 
-export function extractDeviantArtMedia(deviation, allowMature = false) {
-  if ((deviation?.isMature === true || deviation?.is_mature === true) && !allowMature) {
-    throw new Error("该作品是需登录查看的成熟内容，匿名无法获取原图（只能看到打码预览）");
-  }
-  const artwork = normalizeArtwork(deviation, { webStatus: allowMature ? "valid" : "missing" });
+// 兼容旧调用方（纯函数解析）。expansionAuthorized 表示「本次响应已授权附加页」，
+// 与 mature 是否可以发送无关：成熟主图由 OAuth 负责，这里不再拒绝成熟作品。
+export function extractDeviantArtMedia(deviation, expansionAuthorized = false) {
+  const artwork = normalizeArtwork(deviation, { expansionAuthorized });
   return { url: artwork.media[0].url, kind: artwork.media[0].kind, title: titleWithAuthor(artwork) };
 }
 

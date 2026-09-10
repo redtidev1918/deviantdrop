@@ -82,11 +82,12 @@ curl -fsS "https://api.telegram.org/bot${BOT_TOKEN}/setMyCommands" \
   -d '[{"command":"start","description":"开始使用"},{"command":"help","description":"查看用法"},{"command":"about","description":"项目介绍与源码仓库"}]'
 ```
 
-## 4.5 一键登录（账号 + 网页，成熟 / NSFW 多图全未打码）
+## 4.5 一键登录（OAuth + 网页扩展会话）
 
-登录一次，Bot 同时拿到 DeviantArt 账号授权（OAuth）和网页登录状态（Cookie），成熟 / NSFW
-作品的**所有画面（含多图作品的附加页）都会未打码发送**，立即在服务器生效，无需手动复制
-Cookie、无需重启。
+登录一次，Bot 同时拿到 DeviantArt 官方 API 授权（OAuth，内容访问主认证层）和网页扩展会话
+（Cookie，只用于官方 API 不提供的多图附加页）。成熟作品的主图靠 OAuth 就能未打码发送；
+网页扩展会话失效只影响部分多图作品的附加页，不会让成熟作品整体失败。两者都在服务器立即
+生效，无需手动复制 Cookie、无需重启。
 
 在**你自己的电脑**上（需装 Chrome/Edge、能访问 deviantart.com），进入 DeviantDrop 目录：
 
@@ -97,7 +98,7 @@ VPS=root@<你的服务器> npm run login     # 等价于 node scripts/dd-login.m
 脚本自动打开 Chrome 进入 DeviantArt 官方登录页 → 你登录并点「Authorize/允许」→ 页面显示
 「登录成功」。脚本经 Chrome DevTools Protocol 同时捕获 OAuth 授权码与网页登录 Cookie，
 经 ssh 推送到服务器、在容器内兑换并热落盘 `/data/auth/`。完成后 Telegram 私聊 `/status`
-应显示 `OAuth: valid`、`Cookie: available`。
+应显示 `OAuth API: ✅ valid`、`Multi-image web expansion: ✅ valid`。
 
 > 为什么浏览器跑在你电脑上、而不是服务器：DA 登录页的 AWS WAF 人机校验令牌绑定浏览器自身
 > 环境（`detectIp`/`validateHostname`），真实浏览器在真实 DA 域登录天然通过；服务器反代登录页

@@ -1,6 +1,6 @@
 // DeviantArt private DTO -> stable artwork model used outside the adapter.
 
-export function extensionKind(value = "") {
+function extensionKind(value = "") {
   let pathname;
   try {
     pathname = new URL(value).pathname.toLowerCase();
@@ -68,49 +68,69 @@ export function isMatureLoggedOut(deviation = {}) {
     && (deviation.blockReasons || []).includes("mature_loggedout");
 }
 
-export function shouldSkipMatureExtras(input = {}) {
-  const { isMature, hasWebCookie, webStatus, raw } = input;
-  const authorized = Object.hasOwn(input, "webStatus") ? webStatus === "valid" : Boolean(hasWebCookie);
-  return isMature && !authorized && Array.isArray(raw) && raw.length > 0;
+// DeviantArt 对未授权的成熟内容会下发打码版本，URL 里带 blur_ 标记。
+// 这是「响应事实」，比任何缓存的会话状态都可靠。
+export function isBlurredUrl(value = "") {
+  return /blur_/.test(String(value));
 }
 
-export function normalizeArtwork(deviation, { sourceUrl, webStatus = "missing" } = {}) {
+// 媒体 URL -> 发送类型（GIF 必须走 animation，不能混进 photo 相册）。
+export function kindOfUrl(value) {
+  if (/\.gif($|\?)/i.test(value)) return "animation";
+  if (/\.(mp4|m4v)($|\?)/i.test(value)) return "video";
+  return "photo";
+}
+
+// 附加页（additionalMedia）是否整体不可用：只看本次响应是否明确说「未登录」。
+// 与 mature 主图可用性完全无关——主图由 OAuth 负责。
+export function shouldSkipMatureExtras(input = {}) {
+  const { isMature, expansionAuthorized = true, raw } = input;
+  return isMature === true && expansionAuthorized === false && Array.isArray(raw) && raw.length > 0;
+}
+
+// 网页 DTO -> 稳定 artwork 模型。
+// expansionAuthorized 是「本次响应是否授权了网页端扩展能力」，
+// 不参与主图可用性判断：成熟主图由 OAuth 提供，Cookie 缺失只影响附加页。
+export function normalizeArtwork(deviation, { sourceUrl, expansionAuthorized = true } = {}) {
   if (!deviation || typeof deviation !== "object") throw new Error("DeviantArt 没有返回作品数据");
   const mature = deviation.isMature === true || deviation.is_mature === true;
   const primaryDescriptor = deviation.media || {};
   const main = pickDescriptorMedia(primaryDescriptor);
   if (!main) throw new Error("DeviantArt 作品没有可用媒体");
 
-  let media = [{
+  const media = [{
     kind: main.kind,
     url: main.url,
     fallbackUrl: displayMediaUrl(primaryDescriptor),
     mimeType: mimeForKind(main.kind),
-    originalAvailable: !/blur_/.test(main.url),
+    originalAvailable: !isBlurredUrl(main.url),
   }];
 
   let skippedMedia = 0;
   const rawExtras = deviation.extended?.additionalMedia;
   if (deviation.isMultiMedia === true) {
-    if (shouldSkipMatureExtras({ isMature: mature, webStatus, raw: rawExtras })) {
+    if (shouldSkipMatureExtras({ isMature: mature, expansionAuthorized, raw: rawExtras })) {
       skippedMedia = Array.isArray(rawExtras) ? rawExtras.length : 0;
     } else {
       for (const entry of Array.isArray(rawExtras) ? rawExtras : []) {
         const descriptor = entry && typeof entry === "object" ? entry.media : null;
         const picked = descriptor && pickDescriptorMedia(descriptor);
         if (!picked) continue;
+        // 逐条按响应判断：打码的那一页单独跳过，不影响其它页。
+        if (mature && isBlurredUrl(picked.url)) {
+          skippedMedia += 1;
+          continue;
+        }
         media.push({
           kind: picked.kind,
           url: picked.url,
           fallbackUrl: displayMediaUrl(descriptor),
           mimeType: mimeForKind(picked.kind),
-          originalAvailable: !/blur_/.test(picked.url),
+          originalAvailable: !isBlurredUrl(picked.url),
         });
       }
     }
   }
-
-  if (mature && webStatus !== "valid") media[0].originalAvailable = false;
 
   return {
     id: String(deviation.deviationId || deviation.deviationid || deviation.id || ""),
@@ -119,10 +139,10 @@ export function normalizeArtwork(deviation, { sourceUrl, webStatus = "missing" }
     author: deviation.author?.username || null,
     sourceUrl,
     mature,
-    accessStatus: isMatureLoggedOut(deviation) ? "mature_loggedout" : "available",
+    expansionAuthorized,
+    mainSource: "web",
     media,
     skippedMedia,
-    webStatus,
   };
 }
 
@@ -130,6 +150,6 @@ export function titleWithAuthor(artwork) {
   return artwork.author ? `${artwork.title} — ${artwork.author}` : artwork.title;
 }
 
-function mimeForKind(kind) {
+export function mimeForKind(kind) {
   return { photo: "image/jpeg", video: "video/mp4", animation: "image/gif", document: "application/octet-stream" }[kind] || "application/octet-stream";
 }
