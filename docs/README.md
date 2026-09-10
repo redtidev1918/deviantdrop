@@ -15,8 +15,9 @@ Bot 会同时检查普通消息、频道消息和媒体 caption，并识别：
 - 当前作品页（`作者.deviantart.com/art|journal/标题-数字id`）。
 
 解析是双通道的：
-1. **网页接口优先**——出口能被 DeviantArt 放行时（住宅网络，或国内服务器经机场代理），直接走网页作品接口，**新作品、视频/GIF 都能取到**，无需任何存档；
-2. **官方接口兜底**——网页不可达但配置了官方 API 凭据时，走「官方 OAuth API + [archive.org](https://web.archive.org) 存档映射 UUID」（新作品若无存档快照会收到明确中文提示）。
+1. **OAuth 官方 API 是内容访问主认证层**——作品 metadata、**成熟（mature）作品主图**、官方 download/content 都由它提供，refresh token 自动续期；数字 id 需要 UUID 时会经 [archive.org](https://web.archive.org) 存档映射（新作品若无快照会收到明确中文提示）。
+2. **网页接口负责作品结构与多图扩展**——匿名即可取到作品结构与第 1 页（数字 id 直达、无需 UUID 映射），并返回官方 API 不提供的 `extended.additionalMedia`（多图第 2…N 页）。
+3. **网页扩展会话（Cookie）是可选项**——只用于取出成熟多图附加页的未打码版本；它失效只影响这部分附加页，**不会让成熟作品整体失败**，也不会用打码图顶替已经拿到的 OAuth 原图。
 
 无法定位作品页的旧式链接（`fav.me`、`/view/{id}`、`view.php?id=`）两类通道都不支持，会提示改用完整作品页网址。私密/付费/需登录作品同样会提示。
 
@@ -36,8 +37,8 @@ Bot 会同时检查普通消息、频道消息和媒体 caption，并识别：
 1. 接入消息：webhook 校验 secret / 长轮询拉取（`MODE=poll`，免公网入口），并检查可选用户白名单。
 2. 从消息正文/caption 及 Telegram entities 中收集、规范化并去重链接（单条最多 5 个）。
 3. 逐链接解析（双通道）：
-   - **网页通道**：匿名会话（CSRF/cookie，消息内复用 + 跨消息缓存）请求网页作品接口，返回最高清晰度 MP4/图片/GIF（含视频）；
-   - **官方通道**（网页不可达时的兜底）：`client_credentials` 换 token → 数字 id 经 archive.org 存档映射为 UUID（长期缓存）→ 调官方 API 取媒体。
+   - **OAuth 通道**（内容访问主认证层）：refresh token 换 access token → 官方 API 取 metadata 与媒体；成熟作品的主图一律优先用官方 `content`/`download`，因此未打码与 Cookie 无关；
+   - **网页通道**：匿名会话（CSRF/cookie，消息内复用 + 跨消息缓存）取作品结构与附加页；官方 API 不可用时也作为兜底来源；扩展会话失效只降级附加页。
 4. 先回一条自动删除的「处理中」提示并随进度更新，然后发送媒体（媒体 caption 带原作品页链接）。
 5. 媒体送达：webhook 模式经 15 分钟 HMAC 签名代理流式转发（支持 Range）；轮询模式下载媒体后通过 multipart 上传；2–10 个照片/视频使用 `sendMediaGroup`，GIF 或更多文件逐项发送。
 
@@ -45,7 +46,7 @@ Bot 会同时检查普通消息、频道消息和媒体 caption，并识别：
 
 不存在合法的“绕过 DeviantArt 限额”。官方 API 按应用配额与自适应限流；Bot 对网络错误、HTTP 429、500 和 503 会退避重试，token 与 UUID 映射在消息之间缓存复用，显著降低请求总量。持续高并发时应接入 Cloudflare Queue，不能通过轮换 IP 或并发轰炸规避限制。
 
-DA 网页面（含网页作品接口）对其认为是数据中心的出口 IP 段返回 403，Cloudflare Workers 与多数云主机都被封锁；官方 OAuth API 与媒体 CDN（wixmp）相对放行。配置官方 API 凭据后，网页通道被封时 Bot 会自动改用官方通道兜底。
+DA 网页面（含网页作品接口）对其认为是数据中心的出口 IP 段返回 403，Cloudflare Workers 与多数云主机都被封锁；官方 OAuth API 与媒体 CDN（wixmp）相对放行。配置官方 API 凭据后，网页通道被封时会自动改用官方通道；反之官方 API 失败也会保留网页结果继续发送。
 
 Telegram 单会话也可能触发 429；Bot 会读取 `retry_after` 并重试一次。以下情况会直接回复用户可理解的错误：
 
@@ -111,3 +112,5 @@ npm run check                               # 本地 12 项测试 + 语法检查
 - [deviantart-downloader](https://github.com/redtidev1918/deviantart-downloader)：CSRF、作品 ID、cookie 复用、媒体 URL 和失败语义。
 - [DAKit](https://github.com/redtidev1918/dakit)：`_puppy/dadeviation/init` 流程、`fav.me`/作品页 URL 兼容。
 - [TelePost](https://github.com/redtidev1918/TelePost)：Telegram photo/video/animation 类型映射。
+
+发布编排（ReleaseGraph 接入现状与下一代协议切换清单）见 [发布编排说明](RELEASEGRAPH.md)。

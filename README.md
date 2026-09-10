@@ -75,4 +75,4 @@ DeviantArt 有两层**互相独立**的能力，不要把它们混成一件事�
 
 设置 HTTPS `PUBLIC_BASE_URL` 后提供 `/d/:id`，供 Telegram/Discord 读取 OG metadata。只发布匿名 oEmbed 的公开缩略图，不暴露登录后媒体。
 
-完整操作、数据迁移与限制见 [认证与预览指南](docs/AUTH_AND_PREVIEW.md)，审查结论见 [审查记录](docs/FEATURE_AUDIT.md)。
+完整操作、数据迁移与限制见 [认证与预览指南](docs/AUTH_AND_PREVIEW.md)；发布编排（ReleaseGraph 接入现状与下一代协议切换清单）见 [发布编排说明](docs/RELEASEGRAPH.md)；审查结论见 [审查记录](docs/FEATURE_AUDIT.md)。

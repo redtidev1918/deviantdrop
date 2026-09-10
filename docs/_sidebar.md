@@ -1,5 +1,8 @@
 - 开始使用
   - [文档中心](/)
   - [部署（VPS / Docker / Node）](VPS.md)
+- 认证与发布
+  - [认证、预览与多图扩展](AUTH_AND_PREVIEW.md)
+  - [发布编排（ReleaseGraph）](RELEASEGRAPH.md)
 - 项目
   - [更新日志](https://github.com/redtidev1918/deviantdrop/blob/main/CHANGELOG.md)
