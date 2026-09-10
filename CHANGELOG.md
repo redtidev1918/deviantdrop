@@ -10,6 +10,20 @@
 
 ---
 
+## [1.7.0](https://github.com/redtidev1918/deviantdrop/compare/v1.6.3...v1.7.0) (2026-09-10)
+
+
+### Features
+
+* refresh web session from Telegram with /cookie ([fdef6ab](https://github.com/redtidev1918/deviantdrop/commit/fdef6ab9e1283cff98a34efbfcdc32bb9c084898))
+
+
+### Bug Fixes
+
+* preserve oversized multipart album media ([18d3a00](https://github.com/redtidev1918/deviantdrop/commit/18d3a00bbd7c2e67298caf1f04c13f8803141ac9))
+* route login token exchange through the outbound proxy ([c61ac36](https://github.com/redtidev1918/deviantdrop/commit/c61ac363c4fa95de0de3dd52b907454058b5e541))
+* unify DeviantArt auth and media delivery ([1dd36e3](https://github.com/redtidev1918/deviantdrop/commit/1dd36e3245f2353d085c7a7bd2089a56a33d51c3))
+
 ## [1.6.3](https://github.com/redtidev1918/deviantdrop/compare/v1.6.2...v1.6.3) (2026-09-07)
 
 
