@@ -15,7 +15,7 @@ test('registerCommands sets global and admin private command scopes', async () =
     assert.match(calls[0].url, /setMyCommands$/);
     assert.deepEqual(calls[0].body.commands.map((command) => command.command), ['start', 'help', 'about']);
     assert.deepEqual(calls[1].body.scope, { type: 'chat', chat_id: 42 });
-    assert.deepEqual(calls[1].body.commands.map((command) => command.command), ['start', 'help', 'about', 'login', 'status']);
+    assert.deepEqual(calls[1].body.commands.map((command) => command.command), ['start', 'help', 'about', 'login', 'cookie', 'status']);
   } finally {
     globalThis.fetch = original;
   }

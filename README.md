@@ -31,7 +31,7 @@ docker compose up -d --build
 
 ### 登录与所有者命令
 
-管理命令（`/login`、`/status`）只允许 **Bot 所有者**使用：在 `.env` 设置 `ADMIN_IDS=<你的 Telegram 用户 ID>`。未配置时管理命令一律拒绝；普通使用者白名单（`ALLOWED_USER_IDS`）不是管理员。
+管理命令（`/login`、`/cookie`、`/status`）只允许 **Bot 所有者**使用：在 `.env` 设置 `ADMIN_IDS=<你的 Telegram 用户 ID>`。未配置时管理命令一律拒绝；普通使用者白名单（`ALLOWED_USER_IDS`）不是管理员。
 
 DeviantArt 有两套相互独立的登录状态：**OAuth** 负责官方 API；**Web session（auth/auth_secure/userinfo Cookie）**负责成熟作品和多图 `additionalMedia`。任一套失效都不会自动等于另一套失效。
 
@@ -41,6 +41,7 @@ DeviantArt 有两套相互独立的登录状态：**OAuth** 负责官方 API；*
   ```
   脚本会自动打开 Chrome 进入 DeviantArt 官方登录页：你登录并点「Authorize/允许」，脚本同时保存 OAuth 与 Web session 并热生效。DA 的登录页有 AWS WAF 人机校验，用你自己的真实浏览器登录即可正常通过。完成后 `/status` 显示 `OAuth: valid`、`Web session: valid`。
 - **有公网域名（`PUBLIC_BASE_URL`）**：私聊发 `/login`；首次配置或 refresh token 失效时点 OAuth 授权按钮。公网页面不能跨域写入 DA Cookie，网页会话入口用于粘贴新 Cookie；不想手动复制时用上面的电脑一键登录。
+- **只有手机/没有电脑**：在已登录 DA 的浏览器里复制整行 `Cookie:`，在私聊发 `/cookie auth=…; auth_secure=…; userinfo=…`，Bot 存盘后立即探测并回报 `valid`/`unknown`。注意这条会话凭据会经过 Telegram，发完删掉该消息（Bot 会尽力代删）；担心时可在 DA 设置里「退出所有设备」使其作废。
 - **`/status`（所有者私聊）**：主动探测并显示 `Web session: missing|unknown|valid|expired` 与 OAuth 状态（不显示任何密钥）。网络超时、WAF、5xx 只会显示 `unknown`，不会误判为过期；只有登录跳转或 `mature_loggedout` 才标记 `expired`。
 - `DA_REFRESH_TOKEN` / `DA_COOKIES` 只作为**首次迁移 seed**：启动后分别写入 OAuth 与 Web session 文件，refresh token 轮换即落盘；Web Cookie 支持热更新，不再回退读 .env 旧值。
 - OAuth 或 Web session 失效时 Bot 所有者分别收到带对应登录入口的通知（6 小时冷却，恢复后另发一次恢复通知）。

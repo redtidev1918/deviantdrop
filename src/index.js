@@ -177,7 +177,7 @@ async function handleMessage(message, env, origin) {
   }
 
   // 管理员命令：/login（Web OAuth 重新授权）、/status（各组件状态）。
-  const adminCommand = (message.text ?? "").match(/^\/(login|status|cookies)(?:@\w+)?(?:\s|$)/i)?.[1]?.toLowerCase();
+  const adminCommand = (message.text ?? "").match(/^\/(login|status|cookies?)(?:@\w+)?(?:\s|$)/i)?.[1]?.toLowerCase();
   if (adminCommand) {
     await handleAdminCommand(adminCommand, message, env);
     return;
@@ -333,14 +333,46 @@ async function handleAdminCommand(command, message, env) {
     return;
   }
 
-  // /cookies 已并入一键登录（/login）：登录一次同时拿到 OAuth 与网页 Cookie，
-  // 无需再手动复制 Cookie。保留命令名作为引导别名。
-  if (command === "cookies") {
-    await send(
-      "无需再手动复制 Cookie：在电脑上运行一条命令，浏览器登录一次即可同时登录账号和网页，多图全部未打码。\n\n" +
-      "在你的电脑（需装 Chrome/Edge）进入 DeviantDrop 目录，运行：\n`VPS=root@<你的服务器> npm run login`\n\n" +
-      "弹出的 Chrome 里登录 DeviantArt 并点「Authorize/允许」，登录状态会自动推送到服务器并立即生效。",
-    );
+  // /cookie：在 TG 私聊里直接刷新网页会话（成熟作品的附加页需要它）。
+  // 用法：从已登录 DA 的浏览器复制整行 Cookie 后发送 `/cookie auth=…; auth_secure=…; userinfo=…`。
+  if (command === "cookie" || command === "cookies") {
+    if (!env.cookieStore) {
+      await send("这台部署没有 CookieStore（用 DA_COOKIES 环境变量注入），无法在聊天里更新网页会话。");
+      return;
+    }
+    const raw = (message.text ?? "").replace(/^\/cookies?(?:@\w+)?\s*/i, "").trim();
+    if (!raw) {
+      await send(
+        "刷新 DeviantArt 网页会话（成熟多图未打码需要它）：\n\n" +
+        "1. 在已登录 DA 的浏览器里打开 DevTools → Network，刷新页面；\n" +
+        "2. 点任一 `www.deviantart.com` 请求 → Headers → Request Headers；\n" +
+        "3. 复制整行 `Cookie:` 的值，然后发给我：\n\n" +
+        "`/cookie auth=…; auth_secure=…; userinfo=…`\n\n" +
+        "保存后我会立即验证并回报结果。发完请删除你自己的那条消息。",
+      );
+      return;
+    }
+    const cookies = raw.replace(/^cookie:\s*/i, "").replace(/\s+/g, " ").trim();
+    try {
+      env.cookieStore.set(cookies);
+    } catch (error) {
+      await send(`Cookie 格式无效：${failureText(error)}`);
+      return;
+    }
+    // 尽力删掉含凭据的原消息；私聊里 Bot 未必有权删除对方消息，删不掉就提示手动删。
+    const deleted = await telegram(env, "deleteMessage", { chat_id: message.chat.id, message_id: message.message_id }).then(() => true).catch(() => false);
+    let status = WEB_SESSION_STATUS.UNKNOWN;
+    try {
+      status = await probeWebSession(env, { force: true, cacheGet, cacheSet });
+    } catch {
+      status = WEB_SESSION_STATUS.UNKNOWN;
+    }
+    if (status === WEB_SESSION_STATUS.VALID) {
+      await env.authNotifier?.notifyRecovered("cookie");
+      await send(`✅ 网页会话已更新并验证有效，成熟多图会取未打码原图。${deleted ? "含 Cookie 的消息已删除。" : "请手动删除刚才那条含 Cookie 的消息。"}`);
+      return;
+    }
+    await send(`⚠️ Cookie 已保存但验证结果：${status}。请重新复制整行 Cookie（需含 auth/auth_secure/userinfo）；网络波动时也会显示 unknown，可稍后用 /status 复查。`);
     return;
   }
 
@@ -370,7 +402,8 @@ async function handleAdminCommand(command, message, env) {
       "2. 运行：`VPS=root@<你的服务器> node scripts/dd-login.mjs`；\n" +
       "3. 会自动打开 Chrome，在 DeviantArt 官方页登录并点「Authorize/允许」；\n" +
       "4. 脚本自动把登录状态推送到服务器并立即生效，无需重启、无需手动复制 Cookie。\n\n" +
-      "需要电脑装有 Chrome；服务器地址按实际填写。完成后发 /status 应显示 OAuth: valid、Web session: valid。",
+      "需要电脑装有 Chrome；服务器地址按实际填写。完成后发 /status 应显示 OAuth: valid、Web session: valid。\n\n" +
+      "没有电脑时：用 /cookie 把浏览器里的整行 Cookie 直接发给我即可刷新网页会话。",
     );
     return;
   }

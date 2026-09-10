@@ -29,6 +29,8 @@ VPS=root@<VPS-IP> npm run login        # 等价于 node scripts/dd-login.mjs
 
 应用不能代替你在 DeviantArt 完成登录或同意授权——浏览器始终在真实 DA 站点完成登录，脚本只读取登录结果。
 
+没有公网域名、也没有电脑时，可在私聊直接发 `/cookie <整行 Cookie>`：Bot 用 `CookieStore.set()` 热更新，随后强制探测一次并回报 `valid`/`unknown`，同时尽力删除含凭据的原消息。该路径的取舍是把会话凭据经由 Telegram 传输，需要时可用 DA 的「退出所有设备」使其作废。
+
 反向代理应关闭 `/auth/` 的带 query access log，避免记录一次性 token/code；可用 `access_log off` 作用于该路径。本站认证响应 `no-store`、`no-referrer`，禁止 iframe。
 
 ## 未打码与网页登录态

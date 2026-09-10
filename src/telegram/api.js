@@ -96,6 +96,7 @@ export async function registerCommands(env, adminIds = []) {
           { command: 'help', description: '查看用法' },
           { command: 'about', description: '项目与源码' },
           { command: 'login', description: '更新 DeviantArt 登录' },
+          { command: 'cookie', description: '刷新网页会话 Cookie' },
           { command: 'status', description: '查看运行状态' },
         ],
       });
