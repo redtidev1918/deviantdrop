@@ -154,7 +154,7 @@ for (const key of ["BOT_TOKEN", "WEBHOOK_SECRET"]) {
   }
 }
 
-registerCommands(env, adminIds).catch((error) => console.warn("register commands skipped:", error?.message || error));
+registerCommands(env, adminIds);
 
 const port = Number(process.env.PORT || 8080);
 const mode = (process.env.MODE || "poll").toLowerCase();

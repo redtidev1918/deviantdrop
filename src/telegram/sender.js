@@ -93,7 +93,6 @@ async function urlUnit(unit, message, env, caption, primary, cap) {
 
 async function uploadUnit(unit, message, env, caption, primary, onStatus, cap) {
   const entries = [];
-  const documents = [];
 
   for (let i = 0; i < unit.items.length; i += 1) {
     const item = unit.items[i];
@@ -102,35 +101,65 @@ async function uploadUnit(unit, message, env, caption, primary, onStatus, cap) {
     if (downloaded.usedFallback) extension = 'jpg';
     if (item.kind === 'photo' && bytes.length > PHOTO_MAX_BYTES) {
       const compressed = await compressPhoto(bytes);
-      if (compressed) { bytes = compressed; extension = 'jpg'; }
-      else { documents.push({ item: { kind: 'document' }, bytes, extension: guessExt(extension, item.kind) }); continue; }
+      if (compressed) {
+        bytes = compressed;
+        extension = 'jpg';
+      } else {
+        entries.push({ item: { ...item, kind: 'document' }, bytes, extension: guessExt(extension, item.kind) });
+        continue;
+      }
     }
     entries.push({ item, bytes, extension });
   }
 
-  const results = [];
-  if (unit.type === 'album' && entries.length >= 2) {
-    onStatus?.('正在发送相册…');
-    const sent = await telegramForm(env, 'sendMediaGroup', () => {
-      const form = baseForm(message);
-      form.set('media', JSON.stringify(entries.map((entry, i) => ({
-        type: entry.item.kind,
-        media: `attach://file${i}`,
-        ...(i === 0 && caption ? { caption } : {}),
-      }))));
-      entries.forEach((entry, i) => form.set(`file${i}`, new Blob([entry.bytes], { type: MIME_BY_EXTENSION[entry.extension] || 'application/octet-stream' }), `file${i}.${entry.extension}`));
-      return form;
-    });
-    results.push(...(Array.isArray(sent) ? sent : [sent]));
-  } else if (entries.length === 1) {
-    results.push(await uploadSingle(entries[0], message, env, caption, primary, cap, onStatus));
+  const allEntries = entries;
+  if (!allEntries.length) return [];
+
+  if (unit.type === 'album' && allEntries.length >= 2) {
+    return uploadAlbumBatches(allEntries, message, env, caption, primary, cap, onStatus);
   }
-  for (let d = 0; d < documents.length; d += 1) {
-    const doc = documents[d];
-    results.push(await uploadSingle(
-      { item: { kind: 'document' }, bytes: doc.bytes, extension: doc.extension },
-      message, env, d === 0 && entries.length === 0 && primary ? caption : '', d === 0 && entries.length === 0 && primary, cap, onStatus, 'document',
-    ));
+  return [await uploadSingle(allEntries[0], message, env, caption, primary, cap, onStatus, allEntries[0].item.kind === 'document' ? 'document' : null)];
+}
+
+async function uploadAlbumBatches(entries, message, env, caption, primary, cap, onStatus) {
+  const batches = [];
+  let mediaEntries = [];
+  for (const entry of entries) {
+    if (entry.item.kind === 'document') {
+      if (mediaEntries.length) batches.push({ kind: 'album', entries: mediaEntries });
+      batches.push({ kind: 'document', entries: [entry] });
+      mediaEntries = [];
+    } else {
+      mediaEntries.push(entry);
+      if (mediaEntries.length === 10) {
+        batches.push({ kind: 'album', entries: mediaEntries });
+        mediaEntries = [];
+      }
+    }
+  }
+  if (mediaEntries.length) batches.push({ kind: mediaEntries.length === 1 ? 'single' : 'album', entries: mediaEntries });
+
+  const results = [];
+  for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+    const batch = batches[batchIndex];
+    const batchPrimary = primary && batchIndex === 0;
+    const batchCaption = batchPrimary ? caption : '';
+    if (batch.kind === 'album') {
+      onStatus?.('正在发送相册…');
+      const sent = await telegramForm(env, 'sendMediaGroup', () => {
+        const form = baseForm(message);
+        form.set('media', JSON.stringify(batch.entries.map((entry, i) => ({
+          type: entry.item.kind,
+          media: `attach://file${i}`,
+          ...(i === 0 && batchCaption ? { caption: batchCaption } : {}),
+        }))));
+        batch.entries.forEach((entry, i) => form.set(`file${i}`, new Blob([entry.bytes], { type: MIME_BY_EXTENSION[entry.extension] || 'application/octet-stream' }), `file${i}.${entry.extension}`));
+        return form;
+      });
+      results.push(...(Array.isArray(sent) ? sent : [sent]));
+    } else {
+      results.push(await uploadSingle(batch.entries[0], message, env, batchCaption, batchPrimary, cap, onStatus, batch.kind === 'document' ? 'document' : null));
+    }
   }
   return results;
 }

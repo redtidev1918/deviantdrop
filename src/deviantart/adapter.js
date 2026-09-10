@@ -115,7 +115,7 @@ export class DeviantArtAdapter {
           kind: /\.gif($|\?)/i.test(original) ? 'animation' : /\.mp4($|\?)/i.test(original) ? 'video' : 'photo',
           url: original,
           fallbackUrl: artwork.media[0]?.fallbackUrl || null,
-          mimeType: /\.mp4($|\?)/i.test(original) ? 'video/mp4' : 'image/jpeg',
+          mimeType: /\.gif($|\?)/i.test(original) ? 'image/gif' : /\.mp4($|\?)/i.test(original) ? 'video/mp4' : 'image/jpeg',
           originalAvailable: true,
         };
       } else {

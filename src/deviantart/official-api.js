@@ -53,7 +53,7 @@ export function normalizeOfficialArtwork(deviation, { sourceUrl } = {}) {
     author: deviation.author?.username || null,
     sourceUrl,
     mature: deviation.is_mature === true,
-    media: [{ kind, url, fallbackUrl: deviation.preview?.src || null, mimeType: kind === 'gif' ? 'image/gif' : kind === 'video' ? 'video/mp4' : 'image/jpeg', originalAvailable: !!deviation.content?.src }],
+    media: [{ kind, url, fallbackUrl: deviation.preview?.src || null, mimeType: kind === 'animation' ? 'image/gif' : kind === 'video' ? 'video/mp4' : 'image/jpeg', originalAvailable: !!deviation.content?.src }],
     skippedMedia: 0,
     webStatus: 'missing',
   };

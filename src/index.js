@@ -713,13 +713,6 @@ function fromBase64Url(value) {
   return Uint8Array.from(atob(base64), (character) => character.charCodeAt(0));
 }
 
-function getCookies(headers) {
-  const values = typeof headers.getSetCookie === "function"
-    ? headers.getSetCookie()
-    : [headers.get("Set-Cookie")].filter(Boolean);
-  return values.map((value) => value.split(";", 1)[0]).join("; ");
-}
-
 function isSafePublicUrl(url) {
   const host = url.hostname.toLowerCase();
   return url.protocol === "https:" && !url.username && !url.password &&
