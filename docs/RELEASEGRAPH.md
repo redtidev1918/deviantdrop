@@ -7,13 +7,29 @@
 | 项 | 值 |
 | --- | --- |
 | 调用方 | `.github/workflows/release.yml` → `redtidev1918/releasegraph/.github/workflows/reusable-release.yml@v1` |
-| 引擎版本 | `v1` 别名当前指向 `v1.3.0`（commit `d465684`）；`main` 上没有更新的提交 |
+| 引擎版本 | `v1` 稳定别名随引擎发布前移；2026-09-10 已到 `v1.4.0`（commit `79e35db`） |
 | 发布契约 | `.release-policy.yml`（v1 格式：`versioning.mode`） |
 | release-please | `release-please-config.json` 设 `skip-github-release: true`，manifest `.release-please-manifest.json` |
-| 传参 | `version` / `dry_run` / `force` / `repair` / `stage`，与 v1.3.0 的 `workflow_call` 输入一一对应 |
+| 传参 | `version` / `dry_run` / `force` / `repair` / `stage`，与 `workflow_call` 输入一一对应 |
+| 调用方权限 | `contents: write`、`pull-requests: write`、`packages: write`、`issues: write`、`id-token: write` |
 | 健康度 | fleet 面板：`managed`、desired `1.6.3`、latest `v1.6.3`、`HEALTHY` |
 
 Release 资产里出现的 `RELEASE-METADATA.json` 由引擎自己写入，不属于 `assets.required` 契约（本仓库 `assets.required` 为空，`kind: none`）。
+
+### 引擎升级记录（消费方必须跟的部分）
+
+| 引擎版本 | 消费方影响 | 处理 |
+| --- | --- | --- |
+| `v1.4.0`（2026-09-10，Version Provider Reconciliation Layer） | 复用工作流有两个 job 新增 `issues: write`（provider 复核）。调用方未授予该权限时，**整个 Release 运行直接 `startup_failure`，连 job 都不会创建** | 已在 `.github/workflows/release.yml` 的 `permissions` 补上 `issues: write` |
+
+排查方法：Release 出现 `startup_failure` 时先对比 `permissions` 与复用工作流各 job 的权限集合：
+
+```bash
+gh api repos/redtidev1918/releasegraph/contents/.github/workflows/reusable-release.yml --jq '.content' | base64 -d \
+  | grep -E '^\s+(contents|pull-requests|packages|issues|id-token):'
+```
+
+注意：同账户其他受管仓库（dakit / telepress / pixivflow-webui …）当前 caller 也不含 `issues: write`，它们下一次 push 会踩到同一个坑，需要各自补齐。
 
 ## 下一代协议：暂不可用，等引擎发布后再切
 
