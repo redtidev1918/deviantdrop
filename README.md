@@ -2,7 +2,7 @@
 
 把 DeviantArt 作品“丢”进 Telegram 的 Bot：在聊天里发一个作品链接，DeviantDrop 就把作品的图片、视频或 GIF 原样回复给你。
 
-[📖 完整文档](https://redtidev1918.github.io/deviantdrop/) · [更新日志](CHANGELOG.md)
+**语言 / Language:** 中文 · [English](README.en.md) · [📖 完整文档](https://redtidev1918.github.io/deviantdrop/) · [更新日志](CHANGELOG.md)
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Docs](https://img.shields.io/badge/Docs-文档站点-6366f1?style=flat-square)](https://redtidev1918.github.io/deviantdrop/)
@@ -75,4 +75,4 @@ DeviantArt 有两层**互相独立**的能力，不要把它们混成一件事�
 
 设置 HTTPS `PUBLIC_BASE_URL` 后提供 `/d/:id`，供 Telegram/Discord 读取 OG metadata。只发布匿名 oEmbed 的公开缩略图，不暴露登录后媒体。
 
-完整操作、数据迁移与限制见 [认证与预览指南](docs/AUTH_AND_PREVIEW.md)；发布编排（ReleaseGraph 接入现状与下一代协议切换清单）见 [发布编排说明](docs/RELEASEGRAPH.md)；审查结论见 [审查记录](docs/FEATURE_AUDIT.md)。
+完整操作、数据迁移与限制见 [认证与预览指南](docs/AUTH_AND_PREVIEW.md)；发布编排（ReleaseGraph 接入现状与下一代协议切换清单）见 [发布编排说明](docs/RELEASEGRAPH.md)；部署与出口检测结论见 [VPS 部署指南](docs/VPS.md)。

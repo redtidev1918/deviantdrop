@@ -112,4 +112,4 @@ src/
   storage/cache.js         # 持久缓存，排除凭据
 ```
 
-具体原实现问题见 [审查记录](FEATURE_AUDIT.md)。验证运行 `npm run check`；测试涵盖真实 HTTP multipart、poll + HTTP、凭据轮换/损坏/热更新、OAuth state/过期/失败、caption/相册、preview/SSRF、TelePress 策略与失败隔离。部署成功不等于用户 OAuth 授权完成；两者分别验收。
+本轮改造涉及的原始问题与最终结论已并入本文与 [CHANGELOG](https://github.com/redtidev1918/deviantdrop/blob/main/CHANGELOG.md)。验证运行 `npm run check`；测试涵盖真实 HTTP multipart、poll + HTTP、凭据轮换/损坏/热更新、OAuth state/过期/失败、caption/相册、preview/SSRF、TelePress 策略与失败隔离。部署成功不等于用户 OAuth 授权完成；两者分别验收。
