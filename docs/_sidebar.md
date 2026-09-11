@@ -1,15 +1,8 @@
 - 开始使用
-  - [文档中心](/)
+  - [概览](/)
   - [📥 下载与部署](/download.md)
   - [部署（VPS / Docker / Node）](/VPS.md)
-- 认证与发布
+- 使用与配置
   - [认证、预览与多图扩展](/AUTH_AND_PREVIEW.md)
   - [发布编排（ReleaseGraph）](/RELEASEGRAPH.md)
-- 项目
-  - [更新日志](https://github.com/redtidev1918/deviantdrop/blob/main/CHANGELOG.md)
-- English
-  - [Documentation](/en/)
-  - [📥 Download & deploy](/en/download.md)
-  - [VPS deployment handbook](/en/VPS.md)
-  - [Authentication, preview and publishing](/en/AUTH_AND_PREVIEW.md)
-  - [Release orchestration](/en/RELEASEGRAPH.md)
+- [更新日志（GitHub）](https://github.com/redtidev1918/deviantdrop/blob/main/CHANGELOG.md)
