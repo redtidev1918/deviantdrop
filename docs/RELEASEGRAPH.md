@@ -37,7 +37,7 @@ gh api repos/redtidev1918/releasegraph/contents/.github/workflows/reusable-relea
 
 ## 下一代协议：暂不可用，等引擎发布后再切
 
-`releasegraph` 的 README / `docs/zh-CN/quick-start.md` 已按新协议书写（YAML + `apiVersion` + `versioning.provider` + `metadata`）：
+`releasegraph` 的 README / `docs/quick-start.md` 已按新协议书写（YAML + `apiVersion` + `versioning.provider` + `metadata`）：
 
 ```yaml
 apiVersion: releasegraph.dev/v1
