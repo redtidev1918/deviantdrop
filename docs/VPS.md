@@ -1,5 +1,7 @@
 # VPS / 服务器部署手册
 
+**语言 / Language:** 中文 · [English](/en/VPS.md)
+
 Cloudflare Workers 的出口被 DeviantArt 全面封锁，因此 Bot 跑在普通服务器上。
 本手册面向**国内服务器**（实测阿里云直连 deviantart.com 不可达），要点：
 出口必须走代理（clash/mihomo），且代理出口（机场）需要能被 DeviantArt 放行。

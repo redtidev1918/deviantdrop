@@ -10,3 +10,6 @@
 - English
   - [Documentation](/en/)
   - [📥 Download & deploy](/en/download.md)
+  - [VPS deployment handbook](/en/VPS.md)
+  - [Authentication, preview and publishing](/en/AUTH_AND_PREVIEW.md)
+  - [Release orchestration](/en/RELEASEGRAPH.md)

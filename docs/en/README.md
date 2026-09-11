@@ -5,30 +5,26 @@
 > DeviantDrop is a Telegram bot: send a DeviantArt work link and it replies with the work's
 > image, video or GIF unchanged. It is a service, not a downloadable program.
 
+The English documentation is **complete and page-for-page mirrored** with the Chinese section
+under `/`.
+
 ## Entry points
 
 | Document | Content |
 | :-- | :-- |
-| [📥 Download & deploy](download.md) | How to get it running (Docker), and the DeviantArt egress requirement |
+| [📥 Download & deploy](download.md) | How to get it running, and the DeviantArt egress requirement |
 | [README (English)](https://github.com/redtidev1918/deviantdrop/blob/main/README.en.md) | Overview, supported links, sign-in model, reply layout |
 
-## Chinese guides (English index)
-
-The detailed guides are currently written in Chinese. Start from the
-[documentation home](/), or jump directly to:
+## Guides
 
 | Document | Content |
 | :-- | :-- |
-| [VPS deployment (中文)](/VPS.md) | Docker / Node deployment and the datacenter-egress check results |
-| [Authentication, preview and multi-image expansion (中文)](/AUTH_AND_PREVIEW.md) | OAuth vs. web extension session, public preview page, SSRF handling |
-| [Release orchestration (中文)](/RELEASEGRAPH.md) | ReleaseGraph integration status and the next-protocol switchover checklist |
+| [VPS deployment handbook](VPS.md) | Mainland proxy setup, Docker/Node deployment, the egress check results, one-click login, push-to-deploy, and group-chat diagnostics |
+| [Authentication, preview and publishing](AUTH_AND_PREVIEW.md) | First-time setup, the OAuth-primary + optional web-extension model, persistence and migration, the preview fixer, Telegram layout and TelePress |
+| [Release orchestration](RELEASEGRAPH.md) | ReleaseGraph integration as verified, engine upgrade log, and the next-protocol switch-over checklist |
 
 ## Links
 
 - Repository: <https://github.com/redtidev1918/deviantdrop>
 - Releases: <https://github.com/redtidev1918/deviantdrop/releases>
 - Changelog: <https://github.com/redtidev1918/deviantdrop/blob/main/CHANGELOG.md>
-
-> Note: the generated English download page lists release metadata only. For deployment
-> instructions in English, see the deploy section above and the
-> [README](https://github.com/redtidev1918/deviantdrop/blob/main/README.en.md).

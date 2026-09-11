@@ -1,5 +1,7 @@
 # 发布编排（ReleaseGraph）
 
+**语言 / Language:** 中文 · [English](/en/RELEASEGRAPH.md)
+
 本仓库的版本号、tag、GitHub Release 由 [redtidev1918/releasegraph](https://github.com/redtidev1918/releasegraph) 的复用工作流编排；release-please 只负责 conventional commits、CHANGELOG、版本与 Release PR。
 
 ## 当前接入（已核实，2026-09-10）

@@ -1,5 +1,7 @@
 # 认证、预览和可选 Telegraph 发布
 
+**语言 / Language:** 中文 · [English](/en/AUTH_AND_PREVIEW.md)
+
 ## 首次配置与登录
 
 ### 有公网域名（推荐，启用 Telegram 内 `/login` 与预览页）
