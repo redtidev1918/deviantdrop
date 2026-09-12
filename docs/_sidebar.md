@@ -1,6 +1,6 @@
 - 开始使用
   - [概览](/)
-  - [📥 下载与部署](/download.md)
+  - [下载与部署](/download.md)
   - [部署（VPS / Docker / Node）](/VPS.md)
 - 使用与配置
   - [认证、预览与多图扩展](/AUTH_AND_PREVIEW.md)

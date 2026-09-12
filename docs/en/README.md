@@ -2,8 +2,8 @@
 
 **Language / 语言:** [中文](/) · English
 
-> DeviantDrop is a Telegram bot: send a DeviantArt work link and it replies with the work's
-> image, video or GIF unchanged. It is a service, not a downloadable program.
+DeviantDrop is a Telegram bot: send a DeviantArt work link and it replies with the work's
+image, video or GIF unchanged. It is a service, not a downloadable program.
 
 The English documentation is **complete and page-for-page mirrored** with the Chinese section
 under `/`.
@@ -12,7 +12,7 @@ under `/`.
 
 | Document | Content |
 | :-- | :-- |
-| [📥 Download & deploy](download.md) | How to get it running, and the DeviantArt egress requirement |
+| [Download & deploy](download.md) | How to get it running, and the DeviantArt egress requirement |
 | [README (English)](https://github.com/redtidev1918/deviantdrop/blob/main/README.en.md) | Overview, supported links, sign-in model, reply layout |
 
 ## Guides

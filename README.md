@@ -2,12 +2,12 @@
 
 把 DeviantArt 作品“丢”进 Telegram 的 Bot：在聊天里发一个作品链接，DeviantDrop 就把作品的图片、视频或 GIF 原样回复给你。
 
-**语言 / Language:** 中文 · [English](README.en.md) · [📖 完整文档](https://redtidev1918.github.io/deviantdrop/) · [更新日志](CHANGELOG.md)
+**语言 / Language:** 中文 · [English](README.en.md) · [完整文档](https://redtidev1918.github.io/deviantdrop/) · [更新日志](CHANGELOG.md)
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Docs](https://img.shields.io/badge/Docs-文档站点-6366f1?style=flat-square)](https://redtidev1918.github.io/deviantdrop/)
 
-> ⚠️ **部署形态**：DeviantArt 会封锁数据中心出口（Cloudflare Workers 与多数云主机被拦）。请把 Bot 跑在 **DeviantArt 放行的出口**（住宅网络或已检测通过的部分 VPS）上——部署步骤见 [docs/VPS.md](docs/VPS.md)。
+**部署形态**：DeviantArt 会封锁数据中心出口（Cloudflare Workers 与多数云主机被拦）。请把 Bot 跑在 DeviantArt 放行的出口（住宅网络或已检测通过的部分 VPS）上；部署步骤见 [VPS 手册](docs/VPS.md)。
 
 ## 快速部署
 
@@ -67,9 +67,9 @@ DeviantArt 有两层**互相独立**的能力，不要把它们混成一件事�
 
 超大图集（>10 张）或 Telegram 发送失败时，可借助 [TelePress](https://github.com/redtidev1918/telepress) 生成 Telegraph 页面。未配置 URL 时不启用；配置后默认仅失败兜底（`TELEPRESS_MODE=fallback`），大图集需选择 `large-gallery`，失败绝不影响原生 Telegram 发送。同机部署建议 `TELEPRESS_URL=http://127.0.0.1:<port>` 并在两端配置同一个 `TELEPRESS_API_KEY`。
 
-完整的解析机制、双通道细节、限流策略、部署与排错，请看 **📖 文档站点**：
+完整的解析机制、双通道细节、限流策略、部署与排错，请看**文档站点**：
 
-👉 https://redtidev1918.github.io/deviantdrop/
+https://redtidev1918.github.io/deviantdrop/
 
 ### 公开预览页
 
