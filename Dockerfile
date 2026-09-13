@@ -8,6 +8,8 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 COPY src ./src
+# 运行时 secret 的写入端：容器内 node scripts/dd-token.mjs set telegram
+COPY scripts/dd-token.mjs ./scripts/dd-token.mjs
 COPY README.md ./
 
 # 缓存目录与认证文件由 named volume 持久化（/data/cache.json、/data/auth/*.json），容器重建后仍可复用。
