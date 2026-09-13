@@ -56,7 +56,13 @@ jobs:
             cd /opt/deviantdrop
             export HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890
             git pull --ff-only origin main
-            test "$(git rev-parse HEAD)" = "${{ github.sha }}"
+            # The commit that dispatched this run must be an ancestor of what
+            # the VPS checked out, not byte-equal: a second PR merged between
+            # dispatch and the pull fast-forwards origin/main past github.sha,
+            # and an equality check then aborts BEFORE the image is rebuilt —
+            # leaving production on the old image with a pull that looked
+            # healthy. FF-only above already guarantees no backwards move.
+            git merge-base --is-ancestor "${{ github.sha }}" HEAD
             docker compose up -d --build
             for attempt in 1 2 3 4 5; do
               if curl -fsS http://127.0.0.1:8080/health; then exit 0; fi
