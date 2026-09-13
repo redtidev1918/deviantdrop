@@ -195,6 +195,14 @@ event("runtime_started", {
   allowed_user_ids: String(env.ALLOWED_USER_IDS || "").trim() ? "configured" : "unset",
 });
 
+// /health 里带上版本与模式：否则排障时无法确认「线上到底跑的是哪个 commit」。
+env.DD_VERSION = VERSION;
+env.MODE = mode;
+
+// 启动预检：一次 getMe 就足以确定凭据是否可用，并把 Bot 身份写进 /health。
+// 凭据无效时只标记 degraded，绝不退出——退出 + restart 策略 = 无限重启循环。
+await telegramPreflight(env);
+
 // 进程级兜底：任何未捕获异常都不允许把入口链路带走（以前一个 401 就 process.exit(1)）。
 process.on("uncaughtException", (error) => {
   event("process_uncaught_exception", { error: error?.name || "Error", message: error?.message });
@@ -214,6 +222,59 @@ if (mode === "webhook") {
 } else {
   // 长轮询 + HTTP server 并行：poll 拉更新，HTTP server 提供 /health 与 OAuth 回调。
   await pollUpdates(env);
+}
+
+/**
+ * 启动预检（只读 getMe）。把「凭据是否可用」与「Bot 是谁」变成 /health 上的事实，
+ * 而不是要等第一次 getUpdates 失败才知道。username 是公开信息，不涉及任何 secret。
+ */
+async function telegramPreflight(env) {
+  if (!env.BOT_TOKEN) {
+    setComponent("telegram_auth", {
+      state: "missing_token", ok: false, critical: true, detail: "BOT_TOKEN 未配置",
+    });
+    setComponent("telegram_bot", { state: "unknown", ok: false, critical: false });
+    return;
+  }
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/getMe`, {
+      signal: AbortSignal.timeout(15_000),
+    });
+    const data = await response.json().catch(() => null);
+    if (response.ok && data?.ok) {
+      setComponent("telegram_auth", { state: "ok", ok: true, critical: true, detail: null });
+      setComponent("telegram_bot", {
+        state: data.result?.username ? `@${data.result.username}` : "unknown",
+        ok: true,
+        critical: false,
+        detail: data.result?.id ? `id=${data.result.id}` : null,
+      });
+      event("telegram_auth_ok", {
+        stage: "getMe",
+        bot_id: data.result?.id ?? null,
+        bot_username: data.result?.username ?? null,
+      });
+      return;
+    }
+    const description = data?.description || `HTTP ${response.status}`;
+    setComponent("telegram_auth", {
+      state: "unauthorized", ok: false, critical: true, detail: description,
+    });
+    setComponent("telegram_bot", { state: "unavailable", ok: false, critical: false });
+    bump("telegram_unauthorized");
+    event("telegram_auth_rejected", {
+      stage: "getMe",
+      status: response.status,
+      hint: "BOT_TOKEN 已失效/被吊销：在 @BotFather 重新签发后写入 .env 并重启容器",
+    });
+  } catch (error) {
+    const transport = error?.cause?.code || error?.name || "error";
+    setComponent("telegram_auth", {
+      state: "network_error", ok: false, critical: true, detail: transport,
+    });
+    setComponent("telegram_bot", { state: "unreachable", ok: false, critical: false });
+    event("telegram_auth_unreachable", { stage: "getMe", transport });
+  }
 }
 
 /**

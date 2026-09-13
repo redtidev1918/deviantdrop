@@ -141,6 +141,7 @@ test('/start replies without touching DeviantArt',{timeout:30000},async t=>{
     let served=false;
     globalThis.fetch=async(url)=>{
       const u=String(url);
+      if(u.includes('/getMe'))return Response.json({ok:true,result:{id:7777,is_bot:true,username:'regression_bot'}});
       if(u.includes('/getWebhookInfo'))return Response.json({ok:true,result:{url:'',pending_update_count:0}});
       if(u.includes('/getUpdates')){
         if(!served){served=true;return Response.json({ok:true,result:[{update_id:42,message:{message_id:7,date:0,chat:{id:555,type:'private'},from:{id:555},text:'/start'}}]});}
@@ -167,6 +168,10 @@ test('/start replies without touching DeviantArt',{timeout:30000},async t=>{
   const health=await (await fetch(`http://127.0.0.1:${port}/health`)).json();
   assert.equal(health.status,'ok');
   assert.equal(health.components.telegram_ingress.state,'polling');
+  // 启动预检：/health 必须能回答「跑的是哪个版本、哪个模式、哪个 Bot」。
+  assert.equal(health.mode,'poll');
+  assert.equal(health.components.telegram_auth.state,'ok');
+  assert.equal(health.components.telegram_bot.state,'@regression_bot');
   assert.equal(health.counters.updates_received,1);
   assert.equal(health.counters.updates_accepted,1);
   assert.equal(health.counters.tg_sends_ok>=1,true);
