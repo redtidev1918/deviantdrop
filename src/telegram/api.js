@@ -1,7 +1,14 @@
 const TELEGRAM_API = 'https://api.telegram.org';
 
+import { event, bump } from '../runtime/status.js';
+
 export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** 出口链路可观察性载荷：只记方法与目标 chat，绝不记 URL（URL 里含 token）。 */
+function sendFields(method, body) {
+  return { method, chat_id: body?.chat_id ?? null };
 }
 
 function telegramBackoffSeconds(status, result, attempt) {
@@ -12,6 +19,27 @@ function telegramBackoffSeconds(status, result, attempt) {
 }
 
 export async function telegram(env, method, body) {
+  const startedAt = Date.now();
+  const fields = sendFields(method, body);
+  event('tg_send_started', fields);
+  try {
+    const result = await telegramOnce(env, method, body);
+    bump('tg_sends_ok');
+    event('tg_send_ok', { method, chat_id: fields.chat_id, duration_ms: Date.now() - startedAt });
+    return result;
+  } catch (error) {
+    bump('tg_sends_failed');
+    event('tg_send_failed', {
+      method,
+      chat_id: fields.chat_id,
+      duration_ms: Date.now() - startedAt,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+}
+
+async function telegramOnce(env, method, body) {
   for (let attempt = 0; attempt < 4; attempt += 1) {
     let response;
     try {
@@ -40,6 +68,7 @@ export async function telegram(env, method, body) {
     if (!response.ok || !result?.ok) {
       const description = result?.description || `Telegram 返回 HTTP ${response.status}`;
       console.error(new Date().toISOString(), '[tg]', `${method} 失败: ${description}`);
+      event('tg_send_rejected', { method, status: response.status, description });
       throw new Error(description);
     }
     return result.result;
@@ -48,6 +77,26 @@ export async function telegram(env, method, body) {
 }
 
 export async function telegramForm(env, method, formOrFactory) {
+  const startedAt = Date.now();
+  event('tg_send_started', { method, upload: true });
+  try {
+    const result = await telegramFormOnce(env, method, formOrFactory);
+    bump('tg_sends_ok');
+    event('tg_send_ok', { method, upload: true, duration_ms: Date.now() - startedAt });
+    return result;
+  } catch (error) {
+    bump('tg_sends_failed');
+    event('tg_send_failed', {
+      method,
+      upload: true,
+      duration_ms: Date.now() - startedAt,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    throw error;
+  }
+}
+
+async function telegramFormOnce(env, method, formOrFactory) {
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const form = typeof formOrFactory === 'function' ? formOrFactory() : formOrFactory;
     let response;
@@ -72,6 +121,7 @@ export async function telegramForm(env, method, formOrFactory) {
     if (!response.ok || !result?.ok) {
       const description = result?.description || `HTTP ${response.status}`;
       console.error(new Date().toISOString(), '[tg]', `${method} 失败: ${description}`);
+      event('tg_send_rejected', { method, status: response.status, description });
       throw new Error(description);
     }
     return result.result;
