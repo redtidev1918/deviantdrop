@@ -149,7 +149,79 @@ docker compose logs -f deviantdrop     # 轮询模式会持续 getUpdates
 ```
 
 常见问题：
-- `getUpdates 失败: 401` → BOT_TOKEN 无效。
+- `getUpdates 失败: 401` → BOT_TOKEN 无效或被吊销。见下面「降级模式」：服务不会退出，
+  `/health` 会直接说明原因。
+
+### 降级模式与故障域（2026-09 生产故障后固化）
+
+以前的实现里 `getUpdates` 收到 401 就 `process.exit(1)`，配合 compose 的
+`restart: unless-stopped` 会变成无限重启循环（实测 1144 次重启），期间 `/health` 也
+恒返回 `{ok:true}`，无法判断到底哪一环坏了。现在入口链路按故障域隔离：
+
+```text
+telegram_ingress  取更新（poll/webhook）—— 关键域
+telegram_auth     Bot 凭据是否被接受 —— 关键域
+telegram_bot      启动时 getMe 读回的 Bot 身份 —— 信息
+deviantart_auth   DA 抓取/登录 —— 非关键域，失败绝不影响 /start 等命令回复
+http_server       /health 是否在监听 —— 关键域
+```
+
+规则：
+
+- **关键域失败不会让进程退出。** 401 会退避重试（5s→10s→20s→40s→60s 封顶），
+  进程保持存活，`/health` 保持可读，方便直接看到原因。
+- **非关键域失败不影响命令回复。** `/start`、`/help`、非法文本提示、`/health` 都不依赖
+  DeviantArt 登录状态。
+- **`/health` 说真话。** 返回 `status: ok|degraded`、`degraded: [...域]`、
+  `components` 各域状态、`counters` 计数，以及最近 40 条结构化事件。
+
+排障先看一条命令：
+
+```bash
+curl -s http://127.0.0.1:8080/health | python3 -m json.tool
+docker compose logs deviantdrop | grep '\[evt\]' | tail -40
+```
+
+事件日志每个阶段一行 JSON，字段固定，`docker logs | grep '\[evt\]'` 即可区分：
+
+```text
+runtime_started             进程启动（含版本、mode、哪些变量已配置；不含任何 secret）
+telegram_webhook_state      poll 启动时读回 webhook 状态
+telegram_webhook_cleared    poll 模式摘掉残留 webhook（否则 getUpdates 会 409）
+telegram_ingress_unauthorized / _conflict / _error
+update_received             update 真的从 Telegram 到达了入口
+update_accepted             / update_rejected（带 reason）/ update_failed
+da_fetch_started / da_fetch_ok / da_fetch_failed
+tg_send_started / tg_send_ok / tg_send_failed / tg_send_rejected
+```
+
+所有字段写出前经过统一脱敏（token / cookie / secret 命名的键与 token 形态的值都会被替换），
+所以日志可以直接贴进 issue。**任何 secret 都不允许写进日志。**
+
+### poll 与 webhook 互斥
+
+`MODE=poll` 时服务启动会先 `getWebhookInfo`，若存在残留 webhook 就显式 `deleteWebhook`
+（`drop_pending_updates: false`，不丢更新）。残留 webhook 与「另起一个 poller」都会让
+`getUpdates` 返回 409，表现同样是「Bot 完全不回复」。`MODE=webhook` 时反过来只读回状态，
+绝不改动 webhook（webhook 只能由 `MODE=webhook` 的实例负责）。
+
+### Bot Token 被吊销后如何恢复
+
+Token 被吊销（`getMe` 返回 401）时服务进入降级模式并持续重试，此时**必须重新签发 token**：
+在 Telegram 里找 @BotFather → `/mybots` → 选该 Bot → API Token → 重新生成，
+然后写进 VPS 的 `.env` 并重启容器：
+
+```bash
+# 在 VPS 上，用 stdin 写入，避免 token 进入 shell 历史或 argv
+read -rs NEW_TOKEN
+sed -i "s|^BOT_TOKEN=.*|BOT_TOKEN=${NEW_TOKEN}|" /opt/deviantdrop/.env
+unset NEW_TOKEN
+cd /opt/deviantdrop && docker compose up -d --force-recreate
+curl -s http://127.0.0.1:8080/health | python3 -m json.tool   # status 应为 ok
+```
+
+`.env` 只放在 VPS 上、权限 0600，绝不提交进仓库：**历史上正是一次 token 被提交到公开仓库
+导致凭据泄露并被利用**，泄露过的 token 一律视为已吊销，不要尝试复用。
 - 报错「连接失败或超时」→ 代理没生效/机场节点全挂：先
   `curl -x http://127.0.0.1:7890 https://www.gstatic.com/generate_204` 验证代理。
 - DA 报 403/500 类错误 → 该出口（或该机场节点）被 DA 拦：换节点/换出口后重试。
