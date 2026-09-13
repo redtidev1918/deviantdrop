@@ -262,19 +262,34 @@ function liveGetUpdates(probes) {
 /** 轮换前先证明「旧 getUpdates 已经在飞」——不然测的就不是长轮询形态。 */
 async function waitForInflight(bot, { tag, timeout = 8000 }) {
   let found = null;
-  await waitFor(() => {
-    // 单次快照判定：必须**恰好一个** in-flight 且是本代 token。
-    // 两个 = 旧 loop 没退出（这正是要抓的 bug）；零个 = 换代的空档，继续等。
-    const live = liveGetUpdates(bot.probes());
-    found = live.length === 1 && live[0].tag === tag ? live[0] : null;
-    return found !== null;
-  }, { timeout, label: `tag=${tag} 的 getUpdates 必须恰好一个 in-flight` });
+  try {
+    await waitFor(() => {
+      // 单次快照判定：必须**恰好一个** in-flight 且是本代 token。
+      // 两个 = 旧 loop 没退出（这正是要抓的 bug）；零个 = 换代的空档，继续等。
+      const live = liveGetUpdates(bot.probes());
+      found = live.length === 1 && live[0].tag === tag ? live[0] : null;
+      return found !== null;
+    }, { timeout, label: `tag=${tag} 的 getUpdates 必须恰好一个 in-flight` });
+  } catch (error) {
+    error.message += `\nprobe 时间线: ${digest(bot.probes())}`;
+    throw error;
+  }
   return found;
 }
 
 function startedProbes(probes) { return probes.filter((p) => p.event === 'getupdates_started'); }
 function byId(probes, event, id) { return probes.find((p) => p.event === event && p.id === id); }
 function countEvents(output, name) { return output.split(`"event":"${name}"`).length - 1; }
+
+/** 失败时把整条 probe 时间线打出来：不变量测试挂掉时必须能看到「到底谁先谁后」。 */
+function digest(probes) {
+  return probes.map((p) => {
+    if (p.event === 'getupdates_started') return `${p.seq}:started#${p.id}(${p.tag},inflight=${p.inflight})`;
+    if (p.event === 'getupdates_aborted') return `${p.seq}:aborted#${p.id}(${p.kind})`;
+    if (p.event === 'getupdates_finished') return `${p.seq}:finished#${p.id}(${p.outcome}${p.status ? `/${p.status}` : ''})`;
+    return `${p.seq}:${p.event}(${p.tag}${p.id ? `#${p.id}` : ''})`;
+  }).join(' ');
+}
 
 /**
  * 单 loop 不变量的全部判据（每个 e2e 用例末尾都要过一遍）：
@@ -284,6 +299,15 @@ function countEvents(output, name) { return output.split(`"event":"${name}"`).le
  *   4. 每个请求都闭合：finished 时 inflight 归零，且 aborted 一定早于 finished。
  */
 function assertSingleGetUpdates(probes, label) {
+  try {
+    assertSingleGetUpdatesInner(probes, label);
+  } catch (error) {
+    error.message += `\nprobe 时间线: ${digest(probes)}`;
+    throw error;
+  }
+}
+
+function assertSingleGetUpdatesInner(probes, label) {
   const starts = startedProbes(probes);
   assert.ok(starts.length > 0, `${label}: 没有任何 getUpdates 请求`);
   assert.equal(probes.filter((p) => p.event === 'concurrent_getupdates').length, 0, `${label}: 出现并发 getUpdates`);
@@ -318,6 +342,15 @@ function assertSingleGetUpdates(probes, label) {
  * @returns {object} 新 token 的第一个 getUpdates 探测事件
  */
 function assertRotationOrdering(probes, { oldId, newTag, label }) {
+  try {
+    return assertRotationOrderingInner(probes, { oldId, newTag, label });
+  } catch (error) {
+    error.message += `\nprobe 时间线: ${digest(probes)}`;
+    throw error;
+  }
+}
+
+function assertRotationOrderingInner(probes, { oldId, newTag, label }) {
   const start = startedProbes(probes).find((p) => p.id === oldId);
   const aborted = byId(probes, 'getupdates_aborted', oldId);
   const finished = byId(probes, 'getupdates_finished', oldId);
