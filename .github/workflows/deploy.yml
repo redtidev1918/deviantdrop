@@ -35,6 +35,19 @@ jobs:
       - name: Deploy to VPS
         uses: appleboy/ssh-action@v1
         with:
+          # The default is 10m, and `docker compose up -d --build` has to run
+          # `npm ci` inside the image on the VPS behind a local proxy. That step
+          # alone has taken ~9 minutes there, so the whole deploy sits right on
+          # the default limit and times out non-deterministically.
+          #
+          # Measured 2026-09-13: the deploy for PR #23 hit
+          # `2026/09/13 07:55:18 Run Command Timeout` during
+          # `#8 RUN npm ci --omit=dev`, i.e. the fix was merged to main and
+          # never reached the VPS. A timeout here is indistinguishable, from the
+          # outside, from a healthy deploy that simply did not happen — which is
+          # the worst possible failure mode for a deploy that is the ONLY thing
+          # standing between a merged fix and production.
+          command_timeout: 30m
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
