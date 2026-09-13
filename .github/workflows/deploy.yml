@@ -64,8 +64,25 @@ jobs:
             # healthy. FF-only above already guarantees no backwards move.
             git merge-base --is-ancestor "${{ github.sha }}" HEAD
             docker compose up -d --build
-            for attempt in 1 2 3 4 5; do
-              if curl -fsS http://127.0.0.1:8080/health; then exit 0; fi
-              sleep 2
+            # /health deliberately always answers HTTP 200 while degraded, so a
+            # restart loop cannot be amplified by Docker's healthcheck. That
+            # makes `curl -f` useless as a deploy gate: on 2026-09-13 the PR #28
+            # deploy "succeeded" while the response was
+            #   {"ok":false,...,"degraded":["telegram_ingress"],...}
+            # read 2s after start, before the first getUpdates long-poll
+            # (timeout=25s) could flip telegram_ingress from `starting` to
+            # `polling`. Gate on the parsed JSON `ok` field instead, and wait
+            # long enough for that first poll to land.
+            for attempt in $(seq 1 30); do
+              body=$(curl -fsS --max-time 10 http://127.0.0.1:8080/health || true)
+              echo "$body"
+              case "$body" in
+                '{"ok":true'*)
+                  echo "deploy gate: /health ok after ${attempt} attempt(s)"
+                  exit 0
+                  ;;
+              esac
+              sleep 3
             done
+            echo "deploy gate: /health never reported ok" >&2
             exit 1
