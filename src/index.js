@@ -10,6 +10,7 @@ import { probeWebSession } from "./deviantart/web-session.js";
 import { WEB_SESSION_STATUS } from "./auth/cookie-store.js";
 import { sendArtworkPlan, sendFileIdPlan, sendSourceLine as sendPlanSourceLine, filesFromResults } from "./telegram/sender.js";
 import { telegram } from "./telegram/api.js";
+import { healthPayload, event, bump, setComponent } from "./runtime/status.js";
 import { DA_HEADERS } from "./deviantart/http.js";
 const MAX_LINKS = 5;
 const encoder = new TextEncoder();
@@ -27,6 +28,19 @@ const REPO = "https://github.com/redtidev1918/deviantdrop";
 const HELP_TEXT = `发送 DeviantArt 单作品链接或 fav.me 短链，我会回复其中的图片、视频或 GIF。单条消息最多处理 ${MAX_LINKS} 个链接；图片/视频的 caption 里带链接也可以。\n\n/start 开始 · /help 用法 · /about 项目与源码`;
 const ABOUT_TEXT = `DeviantDrop：把 DeviantArt 作品「丢」进 Telegram 的 Bot。\n\n发送 DeviantArt 作品页或 fav.me 短链，即可收到图片、视频或 GIF；每条回复的媒体都会附带原作品页链接。\n\n开源项目（MIT）：${REPO}\n源码、部署与使用说明都在仓库里，欢迎 star、提 issue。`;
 const HINT_TEXT = `没有找到可下载的 DeviantArt 链接。\n\n发送 DeviantArt 作品页或 fav.me 短链，即可收到图片、视频或 GIF。\n/help 查看用法，/about 查看项目与源码。`;
+
+// 入口结果词汇表：handleMessage 返回的原因里，哪些算「候选被拒」（有意不处理），
+// 哪些算「已处理」。以前 /start 也会被记成 rejected，等于把「正常回复」误报成丢弃，
+// 运维 grep 时会得出完全相反的结论。
+const UPDATE_REJECTION_REASONS = new Set([
+  "no_chat",              // 结构里没有 chat（非面向聊天的 update）
+  "duplicate_update_id",  // Telegram 重试的同一个 update
+  "not_allowed",          // ALLOWED_USER_IDS 白名单拒绝
+  "own_forward",          // 用户把 Bot 自己的回复转发回来
+  "no_text",              // 无 caption 的图片/贴纸等，静默忽略
+  "no_links",             // 没有可下载链接（私聊会回用法提示）
+  "media_group_replay",   // 同一相册的后续消息
+]);
 
 // 生产加固参数（README「限流与可靠性」有说明）。
 const UPDATE_DEDUPE_SECONDS = 90; // 同一 Telegram update 去重窗口（防超时重试重复发送）
@@ -84,7 +98,13 @@ export default {
       return Response.json({ ok: true, service: "deviantdrop" });
     }
     if (request.method === "GET" && url.pathname === "/health") {
-      return Response.json({ ok: true, service: "deviantdrop" });
+      // 真实能力快照（各故障域独立）：以前这里恒返回 {ok:true}，所以容器重启 1000+ 次
+      // 期间任何监控都看不出服务其实完全不能收发消息。
+      return Response.json(healthPayload({
+        service: "deviantdrop",
+        version: env.DD_VERSION || null,
+        mode: env.MODE || (env.preview ? "webhook" : "unknown"),
+      }));
     }
     if (url.pathname.startsWith("/d/") && env.preview) return env.preview.handle(request);
     // Web OAuth 登录（/auth/deviantart/start|callback）：由 main.js 装配的 env.handleAuthRequest 处理。
@@ -125,16 +145,44 @@ export default {
 // origin 为 null 时（长轮询、无公网反代）下载媒体后上传到 Telegram。
 export async function handleUpdate(update, env, origin = null) {
   const message = update?.message ?? update?.channel_post;
-  if (!message?.chat?.id) return;
+  if (!message?.chat?.id) {
+    bump("updates_rejected");
+    event("update_rejected", { update_id: update?.update_id ?? null, reason: "no_chat" });
+    return;
+  }
+
+  // 入口边界事件：证明 update 确实从 Telegram 到达了处理入口。
+  // 与「Telegram 根本没送到」这一种故障区分开，是排查「Bot 不回复」的第一分水岭。
+  event("update_received", {
+    update_id: update.update_id ?? null,
+    chat_type: message.chat.type ?? null,
+    chat_id: message.chat.id,
+    from_id: message.from?.id ?? null,
+    body: message.text ? "text" : (message.caption ? "caption" : "other"),
+    has_text: Boolean(message.text || message.caption),
+  });
 
   // Telegram 在超时/断连后会重试同一个 update：若已处理完成过，直接跳过，
   // 避免把同一批作品重复发送。登记发生在处理完成之后，因此中途被掐断的
   // 重试仍会重新处理——宁可部分重复，也不丢消息。
-  if (Number.isInteger(update.update_id) && await cacheGet("upd", `u:${update.update_id}`)) return;
+  if (Number.isInteger(update.update_id) && await cacheGet("upd", `u:${update.update_id}`)) {
+    bump("updates_rejected");
+    event("update_rejected", { update_id: update.update_id, reason: "duplicate_update_id" });
+    return;
+  }
 
+  let outcome = "accepted";
   try {
-    await handleMessage(message, env, origin);
+    outcome = (await handleMessage(message, env, origin)) || "accepted";
   } catch (error) {
+    outcome = "failed";
+    bump("updates_failed");
+    event("update_failed", {
+      update_id: update.update_id ?? null,
+      error: error?.name || "Error",
+      stage: error?.stage || "handler",
+      message: error instanceof Error ? error.message : String(error),
+    });
     console.error("update failed", error?.name || "Error", error?.stage || "handler");
     try {
       await telegram(env, "sendMessage", {
@@ -143,9 +191,24 @@ export async function handleUpdate(update, env, origin = null) {
         reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
         ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
       });
-    } catch {
-      // Telegram 自身不可用时没有第二条可靠通知通道。
+    } catch (notificationError) {
+      // Telegram 自身不可用时没有第二条可靠通知通道——但必须留下痕迹，不能静默吞掉。
+      bump("failure_notices_undeliverable");
+      event("update_failure_notice_undeliverable", {
+        update_id: update.update_id ?? null,
+        error: notificationError instanceof Error ? notificationError.message : String(notificationError),
+      });
     }
+  }
+  if (outcome === "failed") {
+    // 已在上面的 catch 里记过 update_failed 并计数，避免同一故障记成两种事件。
+  } else if (UPDATE_REJECTION_REASONS.has(outcome)) {
+    bump("updates_rejected");
+    event("update_rejected", { update_id: update.update_id ?? null, reason: outcome });
+  } else {
+    // command_reply / admin_command / artwork：都是「已处理并给出结果」。
+    bump("updates_accepted");
+    event("update_accepted", { update_id: update.update_id ?? null, reason: outcome });
   }
   if (Number.isInteger(update.update_id)) {
     await cacheSet("upd", `u:${update.update_id}`, true, UPDATE_DEDUPE_SECONDS);
@@ -164,19 +227,19 @@ async function handleMessage(message, env, origin) {
       reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
       ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
     });
-    return;
+    return "not_allowed";
   }
 
   // 管理员命令：/login（Web OAuth 重新授权）、/status（各组件状态）。
   const adminCommand = (message.text ?? "").match(/^\/(login|status|cookies?)(?:@\w+)?(?:\s|$)/i)?.[1]?.toLowerCase();
   if (adminCommand) {
     await handleAdminCommand(adminCommand, message, env);
-    return;
+    return "admin_command";
   }
 
   // 转发自本 Bot 的消息（用户把上一条回复转发回来）会带着 caption 里的来源链接：
   // 静默忽略，避免把刚下载过的作品再抓一遍。
-  if (isOwnForward(message, env)) return;
+  if (isOwnForward(message, env)) return "own_forward";
 
   const text = message.text ?? message.caption ?? "";
   const entities = message.text != null ? message.entities : message.caption_entities;
@@ -189,12 +252,12 @@ async function handleMessage(message, env, origin) {
       reply_parameters: { message_id: message.message_id, allow_sending_without_reply: true },
       ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
     });
-    return;
+    return "command_reply";
   }
   if (!links.length) {
     // 无 caption 的图片、贴纸等消息不打扰；私聊文本才回用法提示。
     // 群聊里的闲聊和其他 Bot 命令保持安静。
-    if (!text.trim()) return;
+    if (!text.trim()) return "no_text";
     if (message.chat.type === "private") {
       await telegram(env, "sendMessage", {
         chat_id: message.chat.id,
@@ -203,7 +266,7 @@ async function handleMessage(message, env, origin) {
         ...(message.message_thread_id ? { message_thread_id: message.message_thread_id } : {}),
       });
     }
-    return;
+    return "no_links";
   }
 
   // ponytail: 单条消息最多 5 个链接；高吞吐/长时间任务应接 Queue，而不是拖长 webhook。
@@ -212,7 +275,7 @@ async function handleMessage(message, env, origin) {
   // 相册里多张照片若都带链接，只处理最先到达的那条，避免对同一组图连发多份。
   if (message.media_group_id) {
     const groupKey = `g:${message.chat.id}:${message.media_group_id}`;
-    if (await cacheGet("grp", groupKey)) return;
+    if (await cacheGet("grp", groupKey)) return "media_group_replay";
     await cacheSet("grp", groupKey, true, GROUP_DEDUPE_SECONDS);
   }
 
@@ -297,6 +360,7 @@ async function handleMessage(message, env, origin) {
   } finally {
     await statusDelete(); // 全部完成：删除状态提示
   }
+  return "accepted";
 }
 
 // 管理员命令处理：/login（Web OAuth 重新授权）、/status（组件状态，不泄漏任何 secret）。
@@ -520,14 +584,33 @@ async function sendDeviantArt(url, message, env, origin, sessionMemo = {}, onSta
   }
 
   let artwork;
+  event("da_fetch_started", { work_id: target.id, stage: "web_session" });
   try {
     artwork = await daAdapter(env).getArtwork(url.href, env, sessionMemo);
   } catch (error) {
     const canFallback = env.CLIENT_ID && env.CLIENT_SECRET
       && (error instanceof NetworkError || /连接失败|超时|无法连接/.test(error.message));
-    if (!canFallback) throw error;
+    event("da_fetch_failed", {
+      work_id: target.id,
+      stage: "web_session",
+      fallback: canFallback ? "official_api" : "none",
+      error: error instanceof Error ? error.message : String(error),
+    });
+    if (!canFallback) {
+      setComponent("deviantart_auth", {
+        state: "fetch_failed", ok: false, critical: false,
+        detail: error instanceof Error ? error.name : "Error",
+      });
+      throw error;
+    }
     artwork = await daAdapter(env).getOfficialArtwork(url.href, env);
   }
+  event("da_fetch_ok", {
+    work_id: target.id,
+    media: artwork.media.length,
+    skipped: artwork.skippedMedia ?? 0,
+  });
+  setComponent("deviantart_auth", { state: "ok", ok: true, critical: false, detail: null });
 
   const mediaCount = artwork.media.length + artwork.skippedMedia;
   const cap = {

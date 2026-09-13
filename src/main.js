@@ -27,6 +27,15 @@ import { createDiskCache } from "./storage/cache.js";
 import { PreviewService } from "./preview/server.js";
 import { TelePress } from "./publishing/telepress.js";
 import { registerCommands } from "./telegram/api.js";
+import { event, setComponent, bump } from "./runtime/status.js";
+
+// 版本号只用于启动日志与 /health，不参与任何决策；读不到就留空。
+let VERSION = null;
+try {
+  VERSION = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+} catch {
+  VERSION = null;
+}
 
 // —— 代理：国内服务器经 clash 等出口访问被墙的 Telegram/DeviantArt ——
 const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY || "";
@@ -149,8 +158,10 @@ const env = {
 };
 for (const key of ["BOT_TOKEN", "WEBHOOK_SECRET"]) {
   if (!env[key]) {
+    // 配置缺失是可观察事件，不是崩溃条件：以前这里 process.exit(1) + restart 策略
+    // 会把「少配一个变量」放大成无限重启，连 /health 都拿不到。
     console.error(`缺少必需环境变量 ${key}`);
-    process.exit(1);
+    event("config_missing", { variable: key });
   }
 }
 
@@ -165,17 +176,103 @@ const httpHost = process.env.HTTP_HOST || "127.0.0.1";
 const server = createHttpServer(worker.fetch, env);
 server.listen(port, httpHost, () => console.log(`DeviantDrop HTTP listening on ${httpHost}:${server.address().port} (mode=${mode})`));
 
+// —— 故障域登记：HTTP 服务 / Telegram 入口 / Telegram 凭据 / DeviantArt 各自独立 ——
+// HTTP 服务只要在监听就算健康；DeviantArt 认证失败属于非关键域，绝不能把整个 Bot 判成 down。
+setComponent("http_server", { state: "listening", ok: true, critical: true });
+setComponent("telegram_ingress", { state: "starting", ok: false, critical: true });
+setComponent("telegram_auth", { state: "unknown", ok: false, critical: true });
+setComponent("telegram_bot", { state: "unknown", ok: false, critical: false });
+setComponent("deviantart_auth", { state: "unknown", ok: false, critical: false });
+event("runtime_started", {
+  service: "deviantdrop",
+  version: VERSION,
+  mode,
+  port: server.address()?.port ?? port,
+  proxy: proxyUrl ? "configured" : "none",
+  bot_token: env.BOT_TOKEN ? "configured" : "missing",
+  webhook_secret: env.WEBHOOK_SECRET ? "configured" : "missing",
+  public_base_url: publicBaseUrl ? "configured" : "missing",
+  allowed_user_ids: String(env.ALLOWED_USER_IDS || "").trim() ? "configured" : "unset",
+});
+
+// 进程级兜底：任何未捕获异常都不允许把入口链路带走（以前一个 401 就 process.exit(1)）。
+process.on("uncaughtException", (error) => {
+  event("process_uncaught_exception", { error: error?.name || "Error", message: error?.message });
+});
+process.on("unhandledRejection", (reason) => {
+  event("process_unhandled_rejection", {
+    error: reason?.name || "Error",
+    message: reason instanceof Error ? reason.message : String(reason),
+  });
+});
+
 if (mode === "webhook") {
   // webhook 模式：Telegram 推送到 /webhook（需公网 HTTPS 反代并 setWebhook）。HTTP server 已在上面启动。
   console.log("webhook mode: 请用 https://<host>/webhook 注册 Telegram setWebhook（X-Telegram-Bot-Api-Secret-Token=WEBHOOK_SECRET）");
+  setComponent("telegram_ingress", { state: "webhook", ok: true, critical: true });
+  await reportWebhookState(env);
 } else {
   // 长轮询 + HTTP server 并行：poll 拉更新，HTTP server 提供 /health 与 OAuth 回调。
   await pollUpdates(env);
 }
 
+/**
+ * 只读探测：Telegram 当前是否注册了 webhook。
+ * 只输出「有没有」与主机名，不输出完整 URL（URL 路径里可能带凭据）。
+ */
+async function webhookState(env) {
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/getWebhookInfo`, {
+      signal: AbortSignal.timeout(15_000),
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok || !data?.ok) return { readable: false, status: response.status };
+    const info = data.result || {};
+    let host = null;
+    try { host = info.url ? new URL(info.url).host : null; } catch { host = "unparseable"; }
+    return {
+      readable: true,
+      has_webhook: Boolean(info.url),
+      host,
+      pending_update_count: Number(info.pending_update_count ?? 0),
+      last_error_date: info.last_error_date ?? null,
+      last_error_message: info.last_error_message ?? null,
+    };
+  } catch (error) {
+    return { readable: false, transport: error?.cause?.code || error?.name || "error" };
+  }
+}
+
+async function reportWebhookState(env) {
+  const state = await webhookState(env);
+  event("telegram_webhook_state", { mode: "webhook", ...state });
+  return state;
+}
+
 async function pollUpdates(env) {
   console.log("DeviantDrop poll mode: getUpdates loop (HTTP server 同时运行)");
+
+  // poll 与 webhook 互斥：残留 webhook 会让 getUpdates 直接 409，表现就是「Bot 完全不回复」。
+  // 启动时先读回状态，再显式摘掉，保证 poll 模式不会与 webhook 抢更新。
+  const before = await webhookState(env);
+  event("telegram_webhook_state", { mode: "poll", phase: "before_cleanup", ...before });
+  if (before.readable && before.has_webhook) {
+    try {
+      const response = await fetch(`https://api.telegram.org/bot${env.BOT_TOKEN}/deleteWebhook`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ drop_pending_updates: false }),
+        signal: AbortSignal.timeout(15_000),
+      });
+      const data = await response.json().catch(() => null);
+      event("telegram_webhook_cleared", { ok: Boolean(response.ok && data?.ok), status: response.status });
+    } catch (error) {
+      event("telegram_webhook_clear_failed", { transport: error?.cause?.code || error?.name || "error" });
+    }
+  }
+
   let offset = 0;
+  let unauthorizedAttempts = 0;
   while (true) {
     try {
       const query = new URLSearchParams({
@@ -191,36 +288,82 @@ async function pollUpdates(env) {
       if (!response.ok || !data?.ok) {
         const description = data?.description || `HTTP ${response.status}`;
         console.error("getUpdates 失败:", description);
-        if (response.status === 409) {
-          console.error("另一个 getUpdates 长轮询实例在运行？5 秒后重试");
-          await sleep(5000);
-        } else if (response.status === 401) {
-          console.error("BOT_TOKEN 无效，退出");
-          process.exit(1);
-        } else {
-          await sleep(3000);
+        if (response.status === 401) {
+          // 关键：不退出。退出 + restart 策略 = 无限重启循环，连 /health 都读不到，
+          // 而且修复凭据后仍然每 60 秒重来一次。这里保持进程存活、明确标记 degraded、
+          // 用退避重试；操作员换好 token 重启容器即可恢复。
+          unauthorizedAttempts += 1;
+          setComponent("telegram_ingress", { state: "unauthorized", ok: false, critical: true, detail: description });
+          setComponent("telegram_auth", { state: "unauthorized", ok: false, critical: true, detail: description });
+          bump("telegram_unauthorized");
+          event("telegram_ingress_unauthorized", {
+            stage: "getUpdates",
+            attempt: unauthorizedAttempts,
+            hint: "BOT_TOKEN 已失效/被吊销：在 @BotFather 重新签发后写入 .env 并重启容器；服务保持运行以便 /health 可读",
+          });
+          await sleep(backoffMs(unauthorizedAttempts, 5_000, 60_000));
+          continue;
         }
+        if (response.status === 409) {
+          setComponent("telegram_ingress", { state: "conflict", ok: false, critical: true, detail: description });
+          bump("telegram_conflict");
+          event("telegram_ingress_conflict", {
+            stage: "getUpdates",
+            hint: "另一个 getUpdates 长轮询实例在跑，或仍残留 webhook；两者都会让更新被抢走",
+          });
+          await sleep(5_000);
+          continue;
+        }
+        setComponent("telegram_ingress", { state: "error", ok: false, critical: true, detail: description });
+        event("telegram_ingress_error", { stage: "getUpdates", status: response.status });
+        await sleep(3_000);
         continue;
       }
+
+      unauthorizedAttempts = 0;
+      setComponent("telegram_ingress", { state: "polling", ok: true, critical: true, detail: null });
+      setComponent("telegram_auth", { state: "ok", ok: true, critical: true, detail: null });
+
       for (const update of data.result || []) {
         const msg = update.message ?? update.channel_post;
         console.log(
           `[upd] id=${update.update_id} chat=${msg?.chat?.type ?? "?"}(${msg?.chat?.id ?? "?"}) ` +
           `from=${msg?.from?.id ?? "?"} hasText=${!!(msg?.text || msg?.caption)}`,
         );
+        bump("updates_received");
         try {
           await handleUpdate(update, env, null);
         } catch (error) {
+          bump("update_handler_errors");
+          event("update_handler_failed", {
+            update_id: update.update_id,
+            error: error instanceof Error ? error.name : "Error",
+            message: error instanceof Error ? error.message : String(error),
+          });
           console.error("update 处理异常:", error instanceof Error ? error.message : String(error));
         }
         offset = Math.max(offset, Number(update.update_id ?? 0) + 1);
       }
       if ((data.result || []).length === 0) await sleep(500);
     } catch (error) {
+      // 网络域故障：只影响取更新，不影响 HTTP 服务与出站发送能力。
+      setComponent("telegram_ingress", {
+        state: "network_error", ok: false, critical: true,
+        detail: error?.cause?.code || error?.name || "error",
+      });
+      bump("telegram_ingress_network_errors");
+      event("telegram_ingress_error", {
+        stage: "getUpdates", transport: error?.cause?.code || error?.name || "error",
+      });
       console.error("getUpdates 网络错误:", error.cause?.code || error.name, "3 秒后重试");
-      await sleep(3000);
+      await sleep(3_000);
     }
   }
+}
+
+/** 有上限的指数退避：5s → 10s → 20s → 40s → 60s（封顶），避免热循环刷日志。 */
+function backoffMs(attempt, base, cap) {
+  return Math.min(base * 2 ** Math.max(0, attempt - 1), cap);
 }
 
 function sleep(milliseconds) {
