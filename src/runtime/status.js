@@ -57,6 +57,21 @@ const components = new Map();
 const counters = new Map();
 const recent = [];
 
+// 运行时 secret 的「公开摘要」登记表：只存元数据，永不存值。
+// 白名单是刻意的——SECRET_KEY 会把任何名字里带 secret 的字段整段涂掉，
+// 而这里登记的恰恰全是「关于某个 secret 的状态」，逐字段白名单比正则更准。
+const RUNTIME_SECRET_FIELDS = [
+  "source",          // file | env | missing
+  "reloadable",      // 是否支持热更新
+  "state",           // loaded | stale | rejected | missing | validating
+  "last_reload",     // 最近一次接受候选值的时间
+  "last_validation", // ok | invalid | deferred | missing
+  "last_reason",     // 最近一次拒绝/延期的原因（不含任何凭据）
+  "bot_id",          // 公开信息
+  "bot_username",    // 公开信息
+];
+const runtimeSecrets = new Map();
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -82,6 +97,32 @@ export function bump(name, by = 1) {
   counters.set(name, (counters.get(name) || 0) + by);
 }
 
+/**
+ * Record the health-safe summary of one runtime secret.
+ * Callers must never pass the value itself; only metadata fields are kept, so a
+ * secret cannot reach /health even by mistake.
+ */
+export function setRuntimeSecret(name, info = {}) {
+  const previous = runtimeSecrets.get(name);
+  const entry = {};
+  for (const field of RUNTIME_SECRET_FIELDS) {
+    const value = info[field] === undefined ? previous?.[field] ?? null : info[field];
+    entry[field] = typeof value === "string" ? redactString(value) : value;
+  }
+  entry.updated_at = nowIso();
+  runtimeSecrets.set(name, entry);
+  return entry;
+}
+
+export function runtimeSecretStatus(name) {
+  return runtimeSecrets.get(name) ?? null;
+}
+
+/** True while a reload is in flight: /health shows it without lying about ok. */
+export function runtimeSecretsSnapshot() {
+  return Object.fromEntries(runtimeSecrets);
+}
+
 /** One structured lifecycle line. Never pass a secret; redact() is the backstop. */
 export function event(name, fields = undefined) {
   const entry = { event: name, ts: nowIso(), ...(fields ? redact(fields) : {}) };
@@ -104,6 +145,7 @@ export function snapshot() {
     degraded,
     uptime_s: Math.round((Date.now() - startedAt) / 1000),
     recent_events: recent.slice(-RECENT_EVENT_LIMIT),
+    runtime_secrets: runtimeSecretsSnapshot(),
   };
 }
 
@@ -126,6 +168,7 @@ export function healthPayload({ service = "deviantdrop", version = null, mode = 
     components: snap.components,
     counters: snap.counters,
     recent_events: snap.recent_events,
+    runtime_secrets: snap.runtime_secrets,
   };
 }
 
@@ -134,4 +177,5 @@ export function resetForTest() {
   components.clear();
   counters.clear();
   recent.length = 0;
+  runtimeSecrets.clear();
 }

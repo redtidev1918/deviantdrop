@@ -55,6 +55,11 @@ DeviantArt 有两层**互相独立**的能力，不要把它们混成一件事�
 - **只有手机/没有电脑**：在已登录 DA 的浏览器里复制整行 `Cookie:`，在私聊发 `/cookie auth=…; auth_secure=…; userinfo=…`，Bot 存盘后立即探测并回报状态。注意这条会话凭据会经过 Telegram，发完删掉该消息（Bot 会尽力代删）；担心时可在 DA 设置里「退出所有设备」使其作废。
 - **`/status`（所有者私聊）**：分别显示 `OAuth API:` 与 `Multi-image web expansion: missing|unknown|valid|expired` 两条独立状态（不显示任何密钥）。网络超时、WAF、5xx 只会让扩展能力显示 `unknown`，绝不误判为过期，也不会影响 OAuth 状态；只有登录跳转或 `mature_loggedout` 才标记 `expired`。
 - `DA_REFRESH_TOKEN` / `DA_COOKIES` 只作为**首次迁移 seed**：启动后分别写入 OAuth 与网页会话文件，refresh token 轮换即落盘；Cookie 支持热更新，不再回退读 .env 旧值。
+- **`BOT_TOKEN` 也只作为首次 bootstrap**：运行时事实来源是 secret 文件 `/data/secrets/telegram-bot-token`（目录 0700 / 文件 0600，可用 `BOT_TOKEN_FILE` 覆盖），**文件优先于环境变量**。Token 被 BotFather 吊销后不必重启容器，在服务器上跑一条命令即可热恢复：
+  ```bash
+  cd /opt/deviantdrop && ./scripts/set-telegram-token.sh
+  ```
+  服务会在 1~2 秒内发现新值、用 `getMe` 验证、然后**只重建 Telegram 入口**（进程、HTTP 服务、DeviantArt 认证、缓存、预览、OAuth 全都不重启）。写错 token 不会破坏当前有效凭据，网络抖动只会延期验证；`/health` 的 `runtime_secrets` 会说明来源与状态（只有元数据，没有值）。详见 [docs/VPS.md](docs/VPS.md)。
 - OAuth 或网页扩展会话失效时 Bot 所有者分别收到通知，文案各自说明影响范围（6 小时冷却，恢复后另发一次恢复通知）。
 
 ### 回复排版

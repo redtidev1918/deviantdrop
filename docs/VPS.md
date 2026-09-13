@@ -205,23 +205,79 @@ tg_send_started / tg_send_ok / tg_send_failed / tg_send_rejected
 `getUpdates` 返回 409，表现同样是「Bot 完全不回复」。`MODE=webhook` 时反过来只读回状态，
 绝不改动 webhook（webhook 只能由 `MODE=webhook` 的实例负责）。
 
-### Bot Token 被吊销后如何恢复
+### Bot Token 被吊销后如何恢复（运行时热更新，不需要重启）
 
-Token 被吊销（`getMe` 返回 401）时服务进入降级模式并持续重试，此时**必须重新签发 token**：
-在 Telegram 里找 @BotFather → `/mybots` → 选该 Bot → API Token → 重新生成，
-然后写进 VPS 的 `.env` 并重启容器：
+Token 被吊销（`getMe` 返回 401）时服务进入降级模式并持续重试。此时**必须重新签发 token**：
+在 Telegram 里找 @BotFather → `/mybots` → 选该 Bot → API Token → 重新生成。
+
+拿到新 token 后，在 VPS 上**一条命令**完成恢复——不重启容器、不改 `.env`：
 
 ```bash
-# 在 VPS 上，用 stdin 写入，避免 token 进入 shell 历史或 argv
+cd /opt/deviantdrop && ./scripts/set-telegram-token.sh
+# 隐藏输入新 token（不回显、不进 shell 历史、不进 argv）
+```
+
+等 1~2 秒，`/health` 会自己从 `degraded` 变 `ok`：
+
+```bash
+curl -s http://127.0.0.1:8080/health | python3 -m json.tool | head -20
+```
+
+运行中发生的事情（每一步都有 `[evt]` 事件与计数器，日志里不会出现 token）：
+
+```text
+secret_reload_detected     发现运行时 secret 文件变化
+secret_reload_validating   用 getMe 验证候选 token
+secret_reload_applied      验证通过 → 提交 → 只重建 Telegram 入口
+telegram_credential_swapped / telegram_ingress_restarted / telegram_auth_recovered
+```
+
+**Token 的第一事实来源是文件，不是 `.env`**：
+
+```text
+/data/secrets/telegram-bot-token   （目录 0700，文件 0600）
+    >  BOT_TOKEN 环境变量（仅首次 bootstrap / fallback）
+```
+
+- 文件存在就用文件；不存在才用 `.env` 里的 `BOT_TOKEN`；
+- 路径可用 `BOT_TOKEN_FILE` 覆盖（默认 `/data/secrets/telegram-bot-token`）；
+- **绝不监听 `.env`**：`.env` 是部署层输入，容器环境变量也无法在运行时修改；
+- 第一次使用 `set-telegram-token.sh` 后，来源会自动从 `env` 迁移到 `file`，
+  之后 `.env` 里的旧 `BOT_TOKEN` 就不再被读取。
+
+`/health` 里的 `runtime_secrets.telegram_bot_token` 会说明来源与状态（**只有元数据，没有值**）：
+
+```json
+{"source": "file", "reloadable": true, "state": "loaded",
+ "last_reload": "2026-09-13T07:00:09.402Z", "last_validation": "ok",
+ "bot_id": 123456, "bot_username": "your_bot"}
+```
+
+#### 安全与失败语义
+
+- **写错了 token 不会弄坏现有凭据**：候选值必须先通过 `getMe`，失败则保留当前值，
+  `/health` 保持 `ok`，只记 `secret_reload_rejected`；
+- **网络问题不算 token 错**：429 / 5xx / 超时 / DNS 一律记 `secret_reload_deferred`
+  并退避重试同一个候选值，不会因为一次抖动把正确的新 token 判死；
+- **删掉 secret 文件不等于撤销凭据**：继续使用最后一次已验证的 token，
+  只把 `source` 标成 `stale`（要真正撤销请在 BotFather 里吊销）；
+- **热更新永远不会让进程退出**：文件损坏、权限错误、目录顶替文件、Telegram 超时
+  都只是可恢复事件，不会 `process.exit()`，更不会造成重启循环。
+
+#### 仍然保留的兜底路径
+
+如果连 `/health` 都读不到（例如容器根本起不来），退回原来的 `.env` + 重建容器：
+
+```bash
 read -rs NEW_TOKEN
 sed -i "s|^BOT_TOKEN=.*|BOT_TOKEN=${NEW_TOKEN}|" /opt/deviantdrop/.env
 unset NEW_TOKEN
 cd /opt/deviantdrop && docker compose up -d --force-recreate
-curl -s http://127.0.0.1:8080/health | python3 -m json.tool   # status 应为 ok
 ```
 
 `.env` 只放在 VPS 上、权限 0600，绝不提交进仓库：**历史上正是一次 token 被提交到公开仓库
 导致凭据泄露并被利用**，泄露过的 token 一律视为已吊销，不要尝试复用。
+
 - 报错「连接失败或超时」→ 代理没生效/机场节点全挂：先
   `curl -x http://127.0.0.1:7890 https://www.gstatic.com/generate_204` 验证代理。
 - DA 报 403/500 类错误 → 该出口（或该机场节点）被 DA 拦：换节点/换出口后重试。
