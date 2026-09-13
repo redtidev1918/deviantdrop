@@ -5,7 +5,15 @@
 #   docker compose up -d --build
 services:
   deviantdrop:
-    build: .
+    # 把主机的代理透传进「构建期」（npm ci 用）。deploy.yml 在 SSH 脚本里
+    # export 了 HTTP_PROXY/HTTPS_PROXY；这里插值为空时 Dockerfile 的 ARG
+    # 默认空串，无代理环境不受影响。运行时代理由 network_mode: host 直连。
+    build:
+      context: .
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
     image: deviantdrop:local
     network_mode: host
     restart: unless-stopped
