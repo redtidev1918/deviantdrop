@@ -10,6 +10,32 @@
 
 ---
 
+## [1.8.0](https://github.com/redtidev1918/deviantdrop/compare/v1.7.0...v1.8.0) (2026-09-13)
+
+
+### Features
+
+* **cli:** let the operator rotate the token from one command ([7bb9979](https://github.com/redtidev1918/deviantdrop/commit/7bb9979aa125b882e13f5290d376641fe848cc9f))
+* **observability:** /health 直接报出运行的版本、模式与 Bot 身份 ([3909fd0](https://github.com/redtidev1918/deviantdrop/commit/3909fd0ac538db0deb76382428dd13412dd6af44))
+* **observability:** identify the running build and bot on /health ([1e41d48](https://github.com/redtidev1918/deviantdrop/commit/1e41d487e365cd29acbf39204b3e42eac6e57ef1))
+* **observability:** report per-fault-domain status on /health ([52b1c7b](https://github.com/redtidev1918/deviantdrop/commit/52b1c7bbfc8e57e53f6c639764c295662e11b775))
+* **runtime:** add a hot-reloadable runtime secret store ([d4a1fdc](https://github.com/redtidev1918/deviantdrop/commit/d4a1fdc1155b1ca9c1b7fa0d0ddf216c30beefab))
+* **runtime:** Telegram token 运行时可热更新，验证后原子切换、无需重启进程 ([fc90077](https://github.com/redtidev1918/deviantdrop/commit/fc90077afdd9fc26b73e79a77efe567d70af0379))
+* **telegram:** rotate the bot token without restarting the process ([02e4a0e](https://github.com/redtidev1918/deviantdrop/commit/02e4a0ec558224ac89d83c906dff9264be056511))
+
+
+### Bug Fixes
+
+* **bot:** keep serving when the Telegram token is rejected ([f8a3f73](https://github.com/redtidev1918/deviantdrop/commit/f8a3f73e902e60459bd636dea79fae1ab10345b4))
+* **bot:** 恢复 VPS 入口链路并在凭据失效时降级而不是崩溃循环 ([84b976c](https://github.com/redtidev1918/deviantdrop/commit/84b976c8200d9a8aec6d060734f3f6fcbe432cf3))
+* **ci:** VPS 部署的 SSH 命令超时从默认 10m 提到 30m ([#25](https://github.com/redtidev1918/deviantdrop/issues/25)) ([3b28e95](https://github.com/redtidev1918/deviantdrop/commit/3b28e95e1fc2485ebb05c7537b7ec9e743ce1c77))
+* **ci:** 部署的 HEAD 断言改成祖先检查，别在镜像构建前误杀 ([#26](https://github.com/redtidev1918/deviantdrop/issues/26)) ([9569498](https://github.com/redtidev1918/deviantdrop/commit/956949839a3b606a6fbca31125c1d3c67be4ffbe))
+* **deploy:** 健康门禁改判 JSON 的 ok 字段，别被恒 200 的空壳骗过 ([#29](https://github.com/redtidev1918/deviantdrop/issues/29)) ([9161a87](https://github.com/redtidev1918/deviantdrop/commit/9161a87127ae40573f9652f73dac3deb11e7a753))
+* **deploy:** 把代理透传进镜像构建期，修掉 npm ci 的 ETIMEDOUT ([#27](https://github.com/redtidev1918/deviantdrop/issues/27)) ([6da1dcf](https://github.com/redtidev1918/deviantdrop/commit/6da1dcf52fd66535f1d97706619211ea07661d0c))
+* **deploy:** 构建期 RUN 使用宿主网络，修掉代理 ECONNREFUSED ([#28](https://github.com/redtidev1918/deviantdrop/issues/28)) ([f5c6572](https://github.com/redtidev1918/deviantdrop/commit/f5c65723a67ae86c70581c93c4f15087856543f8))
+* **telegram:** abort the old poll loop before starting the new one ([18b799a](https://github.com/redtidev1918/deviantdrop/commit/18b799af60b45d43f0fb87305f41acd454c7ccc3))
+* **telegram:** 轮换时先 abort 旧 poll loop，消除生产 409 ([af0ef8d](https://github.com/redtidev1918/deviantdrop/commit/af0ef8d8d40c4910711833e4147c1914f109bf2f))
+
 ## [1.7.0](https://github.com/redtidev1918/deviantdrop/compare/v1.6.3...v1.7.0) (2026-09-10)
 
 
