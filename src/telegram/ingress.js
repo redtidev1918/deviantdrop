@@ -5,11 +5,16 @@
 // 唯一的「切换 token」手段就是重启容器。现在入口有了明确生命周期：
 //
 //   start()  → 预检 token → 摘掉残留 webhook → 启动且仅启动一个 poll loop
-//   adopt()  → 提交新 token → 中止旧 loop → 只重建 Telegram 入口
+//   adopt()  → 提交新 token → 中止旧 loop 并等它退出 → 摘 webhook → 启动新 loop → 注册命令
 //   stop()   → 中止 loop 并等待它真正退出
 //
+// 轮换的严格顺序（每一步之间的空档都是 409 的来源，因此顺序由测试锁死）：
+//
+//   旧 getUpdates 在飞 → 候选 token getMe 验证成功 → 提交 token
+//   → abort 旧 loop → await 旧 loop 完全退出 → 摘 webhook → 启动唯一新 loop → 注册命令
+//
 // 三条硬约束（都有回归测试）：
-//   * 任何时刻最多一个 poll loop，旧 loop 与新 loop 绝不并存；
+//   * 任何时刻最多一个 poll loop，旧 loop 与新 loop 绝不并存（max getUpdates in flight = 1）；
 //   * token 轮换不导致 process.exit，也不产生未捕获异常；
 //   * 反复轮换不堆积 loop / 不泄漏 Promise（每次重建都 await 旧 loop 结束）。
 //
@@ -129,7 +134,19 @@ export class TelegramIngressController {
     if (this.mode === 'webhook') {
       await this.#serialize(() => this.#startWebhookMode({ botId, botUsername }, { reason }));
     } else {
+      // 顺序就是全部不变量，三步不能重排、第一步也不能省：
+      //   abort 旧 loop → 等它真正退出 → 摘 webhook → 启动且仅启动一个新 loop
+      //
+      // 为什么 abort 必须排在最前（生产 409 事故的根因）：
+      // 旧 loop 每轮取更新都读 env.BOT_TOKEN，而上一行的提交已经把 env.BOT_TOKEN 换成了新 token。
+      // 于是「不 abort 就直接 launch」= 旧 loop 继续用新 token 长轮询、新 loop 也用新 token 长轮询：
+      // 同一个 token 上永远有两个 getUpdates 相互踢，Telegram 持续回
+      // `Conflict: terminated by other getUpdates request`，health 卡在 telegram_ingress=conflict，
+      // telegram_conflict 只增不减——直到有人 docker compose restart 把进程里的两个 loop 一起清掉。
+      // 现在先 abort，再由 #abortLoop() 内部 await 旧 loop 真正退出；新 loop 只可能在这之后启动，
+      // 所以「任何时刻最多一个 getUpdates in flight」是被构造出来的，而不是靠时序运气。
       await this.#serialize(async () => {
+        await this.#abortLoop(reason);
         await this.#clearStaleWebhook();
         this.#launchLoop(reason);
       });
