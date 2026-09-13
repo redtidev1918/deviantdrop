@@ -8,8 +8,13 @@ services:
     # 把主机的代理透传进「构建期」（npm ci 用）。deploy.yml 在 SSH 脚本里
     # export 了 HTTP_PROXY/HTTPS_PROXY；这里插值为空时 Dockerfile 的 ARG
     # 默认空串，无代理环境不受影响。运行时代理由 network_mode: host 直连。
+    #
+    # 光传 ARG 不够：buildkit 的 RUN 默认跑在 build 容器自己的 bridge 网络里，
+    # 那里的 127.0.0.1:7890 是容器自己（ECONNREFUSED，2026-09-13 实测）。
+    # build.network=host 让 RUN 与宿主共享网络栈，127.0.0.1 才是那台 clash。
     build:
       context: .
+      network: host
       args:
         HTTP_PROXY: ${HTTP_PROXY:-}
         HTTPS_PROXY: ${HTTPS_PROXY:-}
