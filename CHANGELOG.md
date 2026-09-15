@@ -10,6 +10,14 @@
 
 ---
 
+## [1.10.1](https://github.com/redtidev1918/deviantdrop/compare/v1.10.0...v1.10.1) (2026-09-15)
+
+
+### Bug Fixes
+
+* postRelease deploy-docs dispatches on default branch (Pages needs branch ref) ([0a7cee7](https://github.com/redtidev1918/deviantdrop/commit/0a7cee7020c020ac15379c3199d6554f9a688e33))
+* workflow_dispatch inputs must not carry description (GitHub dispatch 422) ([17d6e7b](https://github.com/redtidev1918/deviantdrop/commit/17d6e7b4822c68e5ceed77688080cf27e2373039))
+
 ## [1.10.0](https://github.com/redtidev1918/deviantdrop/compare/v1.9.0...v1.10.0) (2026-09-14)
 
 
