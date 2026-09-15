@@ -1,6 +1,6 @@
 {
   "name": "deviantdrop",
-  "version": "1.10.0",
+  "version": "1.10.1",
   "description": "Telegram bot: paste a DeviantArt artwork link, get the original image, video or GIF back with a source link. Self-hosted via Docker or Node.",
   "type": "module",
   "license": "MIT",
